@@ -62,13 +62,37 @@ Then open the Agent Panel, choose **Letta**, and start a thread.
 The adapter reaches Letta through one of three backends, selected with
 `LETTA_ACP_BACKEND` ([self-hosting docs](https://docs.letta.com/self-hosting)):
 
+**`cloud` — Letta Cloud.** Agents run on Letta's hosted platform; the harness
+executes in a cloud sandbox. Get an API key at
+[app.letta.com/api-keys](https://app.letta.com/api-keys):
+
+```json
+"env": {
+  "LETTA_ACP_BACKEND": "cloud",
+  "LETTA_API_KEY": "sk-let-...",
+  "LETTA_AGENT_ID": "agent-..."
+}
+```
+
 **`local` (default) — local runtime.** The SDK spawns a private Letta Code
 app-server on your machine (`letta.js --backend local app-server`); all agent
 state stays on-device under `~/.letta/lc-local-backend`. Requires the
 `@letta-ai/letta-code` CLI to be available (it ships as a dependency of this
 package) and model access: either `letta login`, or connect providers
 directly — `letta --backend local connect anthropic --api-key ...`,
-`connect ollama`, etc. No env vars needed.
+`connect ollama`, etc.
+
+```json
+"env": {
+  "LETTA_ACP_BACKEND": "local",
+  "LETTA_AGENT_ID": "agent-local-..."
+}
+```
+
+Both entries are optional: `local` is the default backend, and without
+`LETTA_AGENT_ID` the adapter creates an agent on first use and logs its id to
+stderr. Setting them explicitly is still recommended — the pin keeps every
+session on the same persistent agent.
 
 **`remote` — self-hosted app server.** Point the adapter at an app server you
 run (`letta server --backend local --listen ws://127.0.0.1:4500`). For
@@ -80,18 +104,6 @@ non-loopback deployments enable auth
   "LETTA_ACP_BACKEND": "remote",
   "LETTA_APP_SERVER_URL": "ws://your-host:4500",
   "LETTA_APP_SERVER_TOKEN": "<capability token, if enabled>",
-  "LETTA_AGENT_ID": "agent-..."
-}
-```
-
-**`cloud` — Letta Cloud.** Agents run on Letta's hosted platform; the harness
-executes in a cloud sandbox. Get an API key at
-[app.letta.com/api-keys](https://app.letta.com/api-keys):
-
-```json
-"env": {
-  "LETTA_ACP_BACKEND": "cloud",
-  "LETTA_API_KEY": "sk-let-...",
   "LETTA_AGENT_ID": "agent-..."
 }
 ```
