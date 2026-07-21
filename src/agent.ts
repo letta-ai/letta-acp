@@ -21,6 +21,10 @@ import {
   type SDKResultMessage,
 } from "@letta-ai/letta-agent-sdk";
 import type { LettaAcpConfig } from "./config.js";
+import {
+  createEditorTools,
+  type EditorFsCapabilities,
+} from "./editor-tools.js";
 import { toolKind, toolLocations, toolTitle } from "./tool-info.js";
 
 interface AcpSessionState {
@@ -58,6 +62,10 @@ export class LettaAcpAgent {
   private readonly client: LettaAgentClient;
   private readonly sessions = new Map<string, AcpSessionState>();
   private agentIdPromise: Promise<string> | null = null;
+  private clientFsCaps: EditorFsCapabilities = {
+    readTextFile: false,
+    writeTextFile: false,
+  };
 
   constructor(config: LettaAcpConfig) {
     this.config = config;
@@ -65,6 +73,11 @@ export class LettaAcpAgent {
   }
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
+    const fs = params.clientCapabilities?.fs;
+    this.clientFsCaps = {
+      readTextFile: fs?.readTextFile === true,
+      writeTextFile: fs?.writeTextFile === true,
+    };
     const requested = params.protocolVersion;
     const protocolVersion =
       typeof requested === "number" && requested < PROTOCOL_VERSION
@@ -86,13 +99,23 @@ export class LettaAcpAgent {
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const agentId = await this.ensureAgent();
     const sessionId = `sess_${crypto.randomUUID()}`;
+    const editorTools = createEditorTools(this.clientFsCaps, {
+      sessionId,
+      getPromptContext: () => this.sessions.get(sessionId)?.promptContext ?? null,
+    });
     const session = this.client.createSession(agentId, {
       cwd: params.cwd,
       model: this.config.model,
       permissionMode: this.config.permissionMode,
       canUseTool: (toolName, toolInput) =>
         this.requestToolPermission(sessionId, toolName, toolInput),
+      ...(editorTools.length > 0 ? { tools: editorTools } : {}),
     });
+    if (editorTools.length > 0) {
+      log(
+        `editor fs tools enabled: ${editorTools.map((tool) => tool.name).join(", ")}`,
+      );
+    }
     this.sessions.set(sessionId, {
       session,
       promptContext: null,

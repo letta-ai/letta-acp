@@ -80,7 +80,8 @@ Then open the Agent Panel, choose **Letta**, and start a thread.
 | `session/request_permission` (allow once / always / reject) | ✅ |
 | `session/cancel` → `stopReason: cancelled` | ✅ |
 | `session/load` | ❌ (capability off) |
-| Client fs / terminal delegation | ❌ (tools run Letta-side) |
+| Client fs delegation (`fs/read_text_file`, `fs/write_text_file`) | ✅ via external tools |
+| Client terminal delegation (`terminal/*`) | ❌ (planned) |
 
 ## How it works
 
@@ -98,3 +99,25 @@ Then open the Agent Panel, choose **Letta**, and start a thread.
   second terminal result — so after such a result the adapter keeps pumping
   the stream (approvals resolve concurrently over the control channel) and
   ends the turn when the agent loop reports it is idle again.
+
+## Editor file access (external tools)
+
+The harness's built-in tools (`Read`, `Edit`, `Bash`, …) always execute
+Letta-side, directly against the filesystem — the ACP client only *renders*
+those tool calls. Letta's [external tools](https://docs.letta.com/platform/app-server/external-tools)
+add capabilities on top (they cannot replace built-ins), and the adapter uses
+them to close the editor-integration gap: when the client advertises
+`clientCapabilities.fs` during `initialize`, each session registers:
+
+- **`read_editor_buffer`** → proxies ACP `fs/read_text_file`, so the agent can
+  read files *as the editor sees them*, including unsaved buffer changes that
+  disk-based `Read` would miss.
+- **`write_via_editor`** → proxies ACP `fs/write_text_file`, so a write lands
+  in the editor's buffer with diff review and undo history instead of a raw
+  disk write.
+
+The tool descriptions steer the model to prefer these for files the user has
+open and the built-ins otherwise. Both go through the normal permission flow.
+Clients that don't advertise fs capabilities get no extra tools and everything
+runs Letta-side as before. Terminal delegation (`terminal/*`) is the remaining
+piece.

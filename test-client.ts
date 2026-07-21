@@ -8,10 +8,13 @@
  *   bun test-client.ts "your prompt here"   # custom prompt
  *
  * Env:
- *   ACP_TEST_REJECT=1          reject permission requests instead of allowing
- *   ACP_TEST_CANCEL_AFTER=ms   send session/cancel this long after prompting
+ *   ACP_TEST_REJECT=1            reject permission requests instead of allowing
+ *   ACP_TEST_CANCEL_AFTER=ms     send session/cancel this long after prompting
+ *   ACP_TEST_BUFFER_FILE=path    simulate an unsaved editor buffer for this file
+ *   ACP_TEST_BUFFER_CONTENT=str  ...containing this content (fs/read_text_file)
  */
 import { spawn } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
@@ -45,6 +48,31 @@ try {
         outcome: { outcome: "selected" as const, optionId },
       };
     })
+    .onRequest(acp.methods.client.fs.readTextFile, (ctx) => {
+      const { path, line, limit } = ctx.params;
+      console.log(
+        `\n[fs/read_text_file] ${path} (line=${line ?? "-"}, limit=${limit ?? "-"})`,
+      );
+      let content =
+        process.env.ACP_TEST_BUFFER_FILE === path &&
+        process.env.ACP_TEST_BUFFER_CONTENT !== undefined
+          ? process.env.ACP_TEST_BUFFER_CONTENT
+          : readFileSync(path, "utf8");
+      if (line !== undefined && line !== null) {
+        const lines = content
+          .split("\n")
+          .slice(line - 1, limit ? line - 1 + limit : undefined);
+        content = lines.join("\n");
+      }
+      return { content };
+    })
+    .onRequest(acp.methods.client.fs.writeTextFile, (ctx) => {
+      console.log(
+        `\n[fs/write_text_file] ${ctx.params.path} (${ctx.params.content.length} chars)`,
+      );
+      writeFileSync(ctx.params.path, ctx.params.content);
+      return {};
+    })
     .onNotification(acp.methods.client.session.update, (ctx) => {
       const update = ctx.params.update;
       switch (update.sessionUpdate) {
@@ -76,7 +104,7 @@ try {
       const init = await ctx.request(acp.methods.agent.initialize, {
         protocolVersion: acp.PROTOCOL_VERSION,
         clientCapabilities: {
-          fs: { readTextFile: false, writeTextFile: false },
+          fs: { readTextFile: true, writeTextFile: true },
         },
       });
       console.log(
