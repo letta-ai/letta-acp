@@ -9,20 +9,6 @@ Built on [`@letta-ai/letta-agent-sdk`](https://github.com/letta-ai/letta-agent-s
 [`@agentclientprotocol/sdk`](https://www.npmjs.com/package/@agentclientprotocol/sdk)
 (protocol plumbing).
 
-## ACP v1, not v2
-
-This adapter implements **protocol v1** (`protocolVersion: 1`):
-
-- v1 is the current stable wire protocol. Every shipping ACP client (including
-  Zed) negotiates v1 during `initialize`.
-- v2 exists only as an unstable schema surface (`@agentclientprotocol/sdk`
-  ships it under `experimental/v2`) that is still churning — MCP-aligned
-  content types, `auth/*` regrouping, unified session lifecycle — with no
-  stable release or client support yet.
-
-When v2 stabilizes, the migration is mostly mechanical (the SDK exposes a
-`dual-version-agent` example for serving both).
-
 ## Quick start
 
 ```bash
@@ -57,13 +43,16 @@ Add to Zed's `settings.json`:
 
 Then open the Agent Panel, choose **Letta**, and start a thread.
 
-## Backend setup
+## Configuration
 
 The adapter reaches Letta through one of three backends, selected with
-`LETTA_ACP_BACKEND` ([self-hosting docs](https://docs.letta.com/self-hosting)):
+`LETTA_ACP_BACKEND` ([self-hosting docs](https://docs.letta.com/self-hosting)).
+Each subsection below shows the full `env` block for that backend.
 
-**`cloud` — Letta Cloud.** Agents run on Letta's hosted platform; the harness
-executes in a cloud sandbox. Get an API key at
+### Letta Cloud (`cloud`)
+
+Agents run on Letta's hosted platform; the harness executes in a cloud
+sandbox. Get an API key at
 [app.letta.com/api-keys](https://app.letta.com/api-keys):
 
 ```json
@@ -74,13 +63,14 @@ executes in a cloud sandbox. Get an API key at
 }
 ```
 
-**`local` (default) — local runtime.** The SDK spawns a private Letta Code
-app-server on your machine (`letta.js --backend local app-server`); all agent
-state stays on-device under `~/.letta/lc-local-backend`. Requires the
-`@letta-ai/letta-code` CLI to be available (it ships as a dependency of this
-package) and model access: either `letta login`, or connect providers
-directly — `letta --backend local connect anthropic --api-key ...`,
-`connect ollama`, etc.
+### Local runtime (`local`, default)
+
+The SDK spawns a private Letta Code app-server on your machine
+(`letta.js --backend local app-server`); all agent state stays on-device under
+`~/.letta/lc-local-backend`. Requires the `@letta-ai/letta-code` CLI to be
+available (it ships as a dependency of this package) and model access: either
+`letta login`, or connect providers directly —
+`letta --backend local connect anthropic --api-key ...`, `connect ollama`, etc.
 
 ```json
 "env": {
@@ -94,8 +84,10 @@ Both entries are optional: `local` is the default backend, and without
 stderr. Setting them explicitly is still recommended — the pin keeps every
 session on the same persistent agent.
 
-**`remote` — self-hosted app server.** Point the adapter at an app server you
-run (`letta server --backend local --listen ws://127.0.0.1:4500`). For
+### Self-hosted app server (`remote`)
+
+Point the adapter at an app server you run
+(`letta server --backend local --listen ws://127.0.0.1:4500`). For
 non-loopback deployments enable auth
 (`--ws-auth capability-token --ws-token-file <path>`):
 
@@ -108,23 +100,19 @@ non-loopback deployments enable auth
 }
 ```
 
+### All backends
+
+| Variable | Effect |
+|----------|--------|
+| `LETTA_AGENT_ID` | reuse an existing agent instead of creating one |
+| `LETTA_ACP_MODEL` | model override for sessions |
+| `LETTA_ACP_PERMISSION_MODE` | initial session mode: `standard` (default), `acceptEdits`, `unrestricted` — switchable live via `session/set_mode` (Zed's mode dropdown) |
+
 Note on tool execution: with `remote` and `cloud`, built-in tools (Read, Bash,
 …) run where the harness runs — the server/sandbox filesystem, not your
 machine. The editor fs tools (`read_editor_buffer`, `write_via_editor`) always
 operate on the editor's files regardless of backend, since they execute in the
 adapter and delegate to the ACP client.
-
-## Configuration
-
-| Variable | Effect |
-|----------|--------|
-| `LETTA_ACP_BACKEND` | `local` (default, SDK-managed app-server), `remote`, or `cloud` |
-| `LETTA_APP_SERVER_URL` | remote backend URL (default `ws://127.0.0.1:4500`) |
-| `LETTA_APP_SERVER_TOKEN` | remote backend auth token |
-| `LETTA_API_KEY` | cloud backend API key |
-| `LETTA_AGENT_ID` | reuse an existing agent instead of creating one |
-| `LETTA_ACP_MODEL` | model override for sessions |
-| `LETTA_ACP_PERMISSION_MODE` | initial session mode: `standard` (default), `acceptEdits`, `unrestricted` — switchable live via `session/set_mode` (Zed's mode dropdown) |
 
 ## What's implemented
 
