@@ -105,7 +105,7 @@ non-loopback deployments enable auth
 | Variable | Effect |
 |----------|--------|
 | `LETTA_AGENT_ID` | reuse an existing agent instead of creating one |
-| `LETTA_ACP_MODEL` | model override for sessions |
+| `LETTA_ACP_MODEL` | model override for sessions, as a `provider/model` handle (e.g. `anthropic/claude-fable-5`, `openai/gpt-4.1`) — run `/model` in a thread to list valid handles |
 | `LETTA_ACP_PERMISSION_MODE` | initial session mode: `standard` (default), `acceptEdits`, `unrestricted` — switchable live via `session/set_mode` (Zed's mode dropdown) |
 
 Note on tool execution: with `remote` and `cloud`, built-in tools (Read, Bash,
