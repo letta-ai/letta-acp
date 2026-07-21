@@ -12,6 +12,8 @@
  *   ACP_TEST_CANCEL_AFTER=ms     send session/cancel this long after prompting
  *   ACP_TEST_BUFFER_FILE=path    simulate an unsaved editor buffer for this file
  *   ACP_TEST_BUFFER_CONTENT=str  ...containing this content (fs/read_text_file)
+ *   ACP_TEST_LOAD_SESSION=id     session/load this session instead of session/new
+ *   ACP_TEST_MODE=modeId         session/set_mode after session setup
  */
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -87,6 +89,11 @@ try {
             console.log(`\n[thought] ${update.content.text}`);
           }
           break;
+        case "user_message_chunk":
+          if (update.content.type === "text") {
+            console.log(`\n[replay:user] ${update.content.text.slice(0, 100)}`);
+          }
+          break;
         case "tool_call":
           console.log(`\n[tool_call] ${update.title} (${update.status})`);
           break;
@@ -111,11 +118,37 @@ try {
         `[init] negotiated protocol v${init.protocolVersion}, capabilities: ${JSON.stringify(init.agentCapabilities)}`,
       );
 
-      const session = await ctx.request(acp.methods.agent.session.new, {
-        cwd: process.cwd(),
-        mcpServers: [],
-      });
-      console.log(`[session] ${session.sessionId}`);
+      const loadId = process.env.ACP_TEST_LOAD_SESSION;
+      let sessionId: string;
+      let modes: unknown;
+      if (loadId) {
+        const loaded = await ctx.request(acp.methods.agent.session.load, {
+          sessionId: loadId,
+          cwd: process.cwd(),
+          mcpServers: [],
+        });
+        sessionId = loadId;
+        modes = loaded.modes;
+        console.log(`[session] loaded ${sessionId}`);
+      } else {
+        const session = await ctx.request(acp.methods.agent.session.new, {
+          cwd: process.cwd(),
+          mcpServers: [],
+        });
+        sessionId = session.sessionId;
+        modes = session.modes;
+        console.log(`[session] ${sessionId}`);
+      }
+      console.log(`[modes] ${JSON.stringify(modes)}`);
+
+      const setMode = process.env.ACP_TEST_MODE;
+      if (setMode) {
+        await ctx.request(acp.methods.agent.session.setMode, {
+          sessionId,
+          modeId: setMode,
+        });
+        console.log(`[mode] set to ${setMode}`);
+      }
 
       console.log(`[prompt] ${promptText}\n`);
       const cancelAfter = Number(process.env.ACP_TEST_CANCEL_AFTER ?? 0);
@@ -125,12 +158,12 @@ try {
             `\n[cancel] sending session/cancel after ${cancelAfter}ms`,
           );
           void ctx.notify(acp.methods.agent.session.cancel, {
-            sessionId: session.sessionId,
+            sessionId,
           });
         }, cancelAfter);
       }
       const result = await ctx.request(acp.methods.agent.session.prompt, {
-        sessionId: session.sessionId,
+        sessionId,
         prompt: [{ type: "text", text: promptText }],
       });
       console.log(`\n\n[done] stopReason: ${result.stopReason}`);

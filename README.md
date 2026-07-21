@@ -67,7 +67,7 @@ Then open the Agent Panel, choose **Letta**, and start a thread.
 | `LETTA_API_KEY` | cloud backend API key |
 | `LETTA_AGENT_ID` | reuse an existing agent instead of creating one |
 | `LETTA_ACP_MODEL` | model override for sessions |
-| `LETTA_ACP_PERMISSION_MODE` | `standard` (default), `acceptEdits`, `unrestricted` |
+| `LETTA_ACP_PERMISSION_MODE` | initial session mode: `standard` (default), `acceptEdits`, `unrestricted` — switchable live via `session/set_mode` (Zed's mode dropdown) |
 
 ## What's implemented
 
@@ -79,9 +79,22 @@ Then open the Agent Panel, choose **Letta**, and start a thread.
 | `session/update` — message/thought chunks, tool calls, tool results | ✅ |
 | `session/request_permission` (allow once / always / reject) | ✅ |
 | `session/cancel` → `stopReason: cancelled` | ✅ |
-| `session/load` | ❌ (capability off) |
+| `session/load` (resume threads with history replay) | ✅ |
+| Session modes (`session/set_mode`: standard / acceptEdits / unrestricted) | ✅ |
+| Slash commands (`available_commands_update`: `/model`) | ✅ |
 | Client fs delegation (`fs/read_text_file`, `fs/write_text_file`) | ✅ via external tools |
 | Client terminal delegation (`terminal/*`) | ❌ (planned) |
+| Plan updates (`plan` from TodoWrite) | ❌ (planned) |
+
+ACP session ids are Letta conversation ids, so `session/load` works across
+adapter restarts with no local state: the conversation is resumed via the SDK
+and its recent history (up to 200 messages) is replayed as `session/update`
+notifications. Session modes are enforced in the adapter's permission
+callback — the harness always runs in `standard` mode so every approval routes
+through the adapter, which is what makes live mode switching possible;
+`acceptEdits` auto-allows file-edit tools, `unrestricted` auto-allows
+everything. `/model` (empty to list, or a handle to switch) is handled in the
+adapter without an LLM turn.
 
 ## How it works
 

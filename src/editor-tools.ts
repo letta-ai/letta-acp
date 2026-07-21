@@ -8,8 +8,8 @@ export interface EditorFsCapabilities {
 }
 
 interface EditorToolContext {
-  /** ACP session these tools are bound to. */
-  sessionId: string;
+  /** ACP session these tools are bound to (assigned once known). */
+  getSessionId: () => string;
   /** Returns the in-flight prompt's ACP context, or null between turns. */
   getPromptContext: () => AgentContext | null;
 }
@@ -59,7 +59,7 @@ export function createEditorTools(
         const { path, line, limit } = readFsArgs(args, { allowRange: true });
         const cx = requireContext(context);
         const response = await cx.request(methods.client.fs.readTextFile, {
-          sessionId: context.sessionId,
+          sessionId: context.getSessionId(),
           path,
           ...(line !== undefined ? { line } : {}),
           ...(limit !== undefined ? { limit } : {}),
@@ -101,7 +101,7 @@ export function createEditorTools(
         }
         const cx = requireContext(context);
         await cx.request(methods.client.fs.writeTextFile, {
-          sessionId: context.sessionId,
+          sessionId: context.getSessionId(),
           path,
           content,
         });

@@ -33,7 +33,13 @@ const connection = await acp
   )
   .onRequest(acp.methods.agent.authenticate, () => ({}))
   .onRequest(acp.methods.agent.session.new, (ctx) =>
-    agent.newSession(ctx.params),
+    agent.newSession(ctx.params, ctx.client),
+  )
+  .onRequest(acp.methods.agent.session.load, (ctx) =>
+    agent.loadSession(ctx.params, ctx.client),
+  )
+  .onRequest(acp.methods.agent.session.setMode, (ctx) =>
+    agent.setSessionMode(ctx.params, ctx.client),
   )
   .onRequest(acp.methods.agent.session.prompt, (ctx) =>
     agent.prompt(ctx.params, ctx.client),

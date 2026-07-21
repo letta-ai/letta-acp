@@ -4,12 +4,16 @@ import {
   type ContentBlock,
   type InitializeRequest,
   type InitializeResponse,
+  type LoadSessionRequest,
+  type LoadSessionResponse,
   methods,
   type NewSessionRequest,
   type NewSessionResponse,
   PROTOCOL_VERSION,
   type PromptRequest,
   type PromptResponse,
+  type SetSessionModeRequest,
+  type SetSessionModeResponse,
   type StopReason,
 } from "@agentclientprotocol/sdk";
 import {
@@ -17,6 +21,7 @@ import {
   LettaAgentClient,
   type LettaCodeSession,
   type MessageContentItem,
+  type PermissionMode,
   type SDKMessage,
   type SDKResultMessage,
 } from "@letta-ai/letta-agent-sdk";
@@ -25,6 +30,12 @@ import {
   createEditorTools,
   type EditorFsCapabilities,
 } from "./editor-tools.js";
+import { historyToUpdates } from "./history-replay.js";
+import {
+  isSessionModeId,
+  modeAutoAllows,
+  sessionModeState,
+} from "./session-modes.js";
 import { toolKind, toolLocations, toolTitle } from "./tool-info.js";
 
 interface AcpSessionState {
@@ -36,7 +47,20 @@ interface AcpSessionState {
   /** Tools the user chose "always allow" for, scoped to this session. */
   alwaysAllowed: Set<string>;
   cancelled: boolean;
+  /** ACP session mode; enforced adapter-side in the permission callback. */
+  modeId: PermissionMode;
 }
+
+/** Max history messages replayed on session/load. */
+const LOAD_HISTORY_LIMIT = 200;
+
+const AVAILABLE_COMMANDS = [
+  {
+    name: "model",
+    description: "Show available models or switch the session's model",
+    input: { hint: "model name (leave empty to list)" },
+  },
+];
 
 type PumpOutcome =
   | { kind: "result"; result: SDKResultMessage }
@@ -86,7 +110,7 @@ export class LettaAcpAgent {
     return {
       protocolVersion,
       agentCapabilities: {
-        loadSession: false,
+        loadSession: true,
         promptCapabilities: {
           image: true,
           embeddedContext: true,
@@ -96,35 +120,146 @@ export class LettaAcpAgent {
     };
   }
 
-  async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
+  async newSession(
+    params: NewSessionRequest,
+    cx: AgentContext,
+  ): Promise<NewSessionResponse> {
     const agentId = await this.ensureAgent();
-    const sessionId = `sess_${crypto.randomUUID()}`;
-    const editorTools = createEditorTools(this.clientFsCaps, {
-      sessionId,
-      getPromptContext: () => this.sessions.get(sessionId)?.promptContext ?? null,
-    });
-    const session = this.client.createSession(agentId, {
+    const { sessionId, state } = await this.openSession({
       cwd: params.cwd,
-      model: this.config.model,
-      permissionMode: this.config.permissionMode,
-      canUseTool: (toolName, toolInput) =>
-        this.requestToolPermission(sessionId, toolName, toolInput),
-      ...(editorTools.length > 0 ? { tools: editorTools } : {}),
+      resumeId: null,
+      agentId,
     });
+    log(`session ${sessionId} -> agent ${agentId} (cwd: ${params.cwd})`);
+    this.announceCommands(sessionId, cx);
+    return { sessionId, modes: sessionModeState(state.modeId) };
+  }
+
+  async loadSession(
+    params: LoadSessionRequest,
+    cx: AgentContext,
+  ): Promise<LoadSessionResponse> {
+    if (
+      !params.sessionId.startsWith("conv-") &&
+      !params.sessionId.startsWith("local-conv-")
+    ) {
+      throw new Error(
+        `Cannot load session ${params.sessionId}: not a Letta conversation id`,
+      );
+    }
+    const { sessionId, state } = await this.openSession({
+      cwd: params.cwd,
+      resumeId: params.sessionId,
+      agentId: null,
+    });
+    const history = await state.session.listMessages({
+      order: "desc",
+      limit: LOAD_HISTORY_LIMIT,
+    });
+    if (history.hasMore) {
+      log(
+        `session ${sessionId} has more than ${LOAD_HISTORY_LIMIT} messages; replaying the most recent ${LOAD_HISTORY_LIMIT}`,
+      );
+    }
+    const updates = historyToUpdates([...history.messages].reverse());
+    for (const update of updates) {
+      await cx.notify(methods.client.session.update, { sessionId, update });
+    }
+    log(`loaded session ${sessionId} (${updates.length} replayed updates)`);
+    this.announceCommands(sessionId, cx);
+    return { modes: sessionModeState(state.modeId) };
+  }
+
+  async setSessionMode(
+    params: SetSessionModeRequest,
+    cx: AgentContext,
+  ): Promise<SetSessionModeResponse> {
+    const state = this.sessions.get(params.sessionId);
+    if (!state) {
+      throw new Error(`Unknown session: ${params.sessionId}`);
+    }
+    if (!isSessionModeId(params.modeId)) {
+      throw new Error(`Unknown mode: ${params.modeId}`);
+    }
+    state.modeId = params.modeId;
+    log(`session ${params.sessionId} mode -> ${params.modeId}`);
+    void cx.notify(methods.client.session.update, {
+      sessionId: params.sessionId,
+      update: {
+        sessionUpdate: "current_mode_update",
+        currentModeId: params.modeId,
+      },
+    });
+    return {};
+  }
+
+  /**
+   * Creates or resumes the underlying Letta session and registers state.
+   *
+   * The ACP session id is the Letta conversation id, which is what makes
+   * session/load work across adapter restarts with no local persistence. The
+   * id is only known after the runtime initializes, so callbacks close over a
+   * mutable ref that is filled in before any of them can fire (they only run
+   * during prompts).
+   *
+   * The harness always runs with permissionMode "standard"; the ACP-selected
+   * mode is enforced adapter-side (see session-modes.ts).
+   */
+  private async openSession(options: {
+    cwd: string;
+    resumeId: string | null;
+    agentId: string | null;
+  }): Promise<{ sessionId: string; state: AcpSessionState }> {
+    const ref = { sessionId: options.resumeId ?? "" };
+    const editorTools = createEditorTools(this.clientFsCaps, {
+      getSessionId: () => ref.sessionId,
+      getPromptContext: () =>
+        this.sessions.get(ref.sessionId)?.promptContext ?? null,
+    });
+    const sessionOptions = {
+      cwd: options.cwd,
+      model: this.config.model,
+      permissionMode: "standard" as const,
+      canUseTool: (toolName: string, toolInput: Record<string, unknown>) =>
+        this.requestToolPermission(ref.sessionId, toolName, toolInput),
+      ...(editorTools.length > 0 ? { tools: editorTools } : {}),
+    };
+    const session = options.resumeId
+      ? this.client.resumeSession(options.resumeId, sessionOptions)
+      : this.client.createSession(options.agentId ?? "", sessionOptions);
+    // Force runtime initialization so the conversation id exists.
+    await session.listMessages({ limit: 1 });
+    const sessionId = options.resumeId ?? session.conversationId;
+    if (!sessionId) {
+      session.close();
+      throw new Error("Letta session did not report a conversation id");
+    }
+    ref.sessionId = sessionId;
     if (editorTools.length > 0) {
       log(
         `editor fs tools enabled: ${editorTools.map((tool) => tool.name).join(", ")}`,
       );
     }
-    this.sessions.set(sessionId, {
+    const state: AcpSessionState = {
       session,
       promptContext: null,
       lastToolCall: null,
       alwaysAllowed: new Set(),
       cancelled: false,
+      modeId: this.config.permissionMode,
+    };
+    this.sessions.set(sessionId, state);
+    return { sessionId, state };
+  }
+
+  private announceCommands(sessionId: string, cx: AgentContext): void {
+    void cx.notify(methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: AVAILABLE_COMMANDS,
+      },
     });
-    log(`session ${sessionId} -> agent ${agentId} (cwd: ${params.cwd})`);
-    return { sessionId };
   }
 
   async prompt(
@@ -139,6 +274,8 @@ export class LettaAcpAgent {
     state.cancelled = false;
 
     try {
+      const commandResponse = await this.maybeRunCommand(params, state, cx);
+      if (commandResponse) return commandResponse;
       await state.session.send(toLettaContent(params.prompt));
       // The Letta app-server transport completes a turn with a recoverable
       // "approval_conflict" result whenever a tool needs user approval. The
@@ -177,6 +314,59 @@ export class LettaAcpAgent {
     } finally {
       state.promptContext = null;
     }
+  }
+
+  /**
+   * Handles slash commands advertised via available_commands_update without
+   * involving the LLM. Returns null when the prompt is not a command.
+   */
+  private async maybeRunCommand(
+    params: PromptRequest,
+    state: AcpSessionState,
+    cx: AgentContext,
+  ): Promise<PromptResponse | null> {
+    const first = params.prompt[0];
+    if (params.prompt.length !== 1 || first?.type !== "text") return null;
+    const match = first.text.trim().match(/^\/model(?:\s+(.*))?$/);
+    if (!match) return null;
+    const argument = match[1]?.trim();
+
+    const reply = async (text: string) => {
+      await cx.notify(methods.client.session.update, {
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text },
+        },
+      });
+    };
+    try {
+      if (!argument) {
+        const result = await state.session.listModels();
+        const lines = result.entries.map((model) => {
+          const marks = [
+            model.isDefault ? "default" : null,
+            model.free ? "free" : null,
+          ]
+            .filter(Boolean)
+            .join(", ");
+          return `- \`${model.handle}\` — ${model.label}${marks ? ` (${marks})` : ""}`;
+        });
+        await reply(
+          `Available models:\n${lines.join("\n")}\n\nSwitch with \`/model <handle>\`.`,
+        );
+      } else {
+        const result = await state.session.updateModel(argument);
+        await reply(
+          `Model switched to \`${result.modelHandle ?? result.modelId ?? argument}\`.`,
+        );
+      }
+    } catch (error) {
+      await reply(
+        `/model failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return { stopReason: "end_turn" };
   }
 
   /**
@@ -371,6 +561,10 @@ export class LettaAcpAgent {
     toolName: string,
     toolInput: Record<string, unknown>,
   ): Promise<CanUseToolResponse> {
+    if (modeAutoAllows(state.modeId, toolName)) {
+      log(`auto-allowing ${toolName} (mode ${state.modeId})`);
+      return { behavior: "allow", updatedInput: toolInput };
+    }
     log(`permission requested for ${toolName}`);
     if (state.alwaysAllowed.has(toolName)) {
       return { behavior: "allow", updatedInput: toolInput };
