@@ -126,7 +126,7 @@ adapter and delegate to the ACP client.
 | `session/cancel` → `stopReason: cancelled` | ✅ |
 | `session/load` (resume threads with history replay) | ✅ |
 | Session modes (`session/set_mode`: standard / acceptEdits / unrestricted) | ✅ |
-| Slash commands (`available_commands_update`: `/model`) | ✅ |
+| Slash commands (`available_commands_update`, ~30 commands + skills) | ✅ |
 | Client fs delegation (`fs/read_text_file`, `fs/write_text_file`) | ✅ via external tools |
 | Client terminal delegation (`terminal/*`) | ❌ (planned) |
 | Plan updates (`plan` from TodoWrite) | ❌ (planned) |
@@ -140,6 +140,27 @@ through the adapter, which is what makes live mode switching possible;
 `acceptEdits` auto-allows file-edit tools, `unrestricted` auto-allows
 everything. `/model` (empty to list, or a handle to switch) is handled in the
 adapter without an LLM turn.
+
+### Slash commands
+
+The adapter advertises the [Letta slash commands](https://docs.letta.com/platform/cli/slash-commands)
+that make sense over ACP, so they appear in the client's `/` menu:
+
+- **Adapter-native**: `/model`.
+- **Harness-executed** (via the app-server `execute_command` protocol):
+  `/clear`, `/compact`, `/init`, `/doctor`, `/remember`, `/context-limit`,
+  `/reload`, `/toolset`. Commands that run a full agent turn (`/init`,
+  `/remember`, `/doctor`) stream their tool calls and output like any prompt.
+- **Model-interpreted**: `/memory`, `/search`, `/skills`, `/skill-creator`,
+  plus every skill discovered on disk (bundled with letta-code,
+  `~/.letta/skills`, and the session cwd's `.claude/skills`) — these forward
+  as prompt text, which the harness instructs the model to treat as a skill
+  invocation.
+
+The rest of the CLI's commands (`/agents`, `/resume`, `/login`, `/statusline`,
+`/exit`, …) are TUI dialogs or local-process controls with no protocol
+equivalent; use the editor's own UI for those (new thread ≈ `/new`, thread
+history ≈ `/resume`).
 
 ## How it works
 

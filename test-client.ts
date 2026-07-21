@@ -102,6 +102,11 @@ try {
             `[tool_call_update] ${update.toolCallId}: ${update.status}`,
           );
           break;
+        case "available_commands_update":
+          console.log(
+            `\n[commands] ${update.availableCommands.map((c) => c.name).join(", ")}`,
+          );
+          break;
         default:
           console.log(`\n[${update.sessionUpdate}]`);
           break;

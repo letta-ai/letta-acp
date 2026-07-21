@@ -36,6 +36,10 @@ import {
   modeAutoAllows,
   sessionModeState,
 } from "./session-modes.js";
+import {
+  buildAvailableCommands,
+  isExecuteCommand,
+} from "./slash-commands.js";
 import { toolKind, toolLocations, toolTitle } from "./tool-info.js";
 
 interface AcpSessionState {
@@ -49,18 +53,15 @@ interface AcpSessionState {
   cancelled: boolean;
   /** ACP session mode; enforced adapter-side in the permission callback. */
   modeId: PermissionMode;
+  /** Session working directory (for project skill discovery). */
+  cwd: string;
 }
 
 /** Max history messages replayed on session/load. */
 const LOAD_HISTORY_LIMIT = 200;
 
-const AVAILABLE_COMMANDS = [
-  {
-    name: "model",
-    description: "Show available models or switch the session's model",
-    input: { hint: "model name (leave empty to list)" },
-  },
-];
+/** Safety cap on stream rounds while waiting for a slash command to finish. */
+const EXECUTE_COMMAND_MAX_ROUNDS = 50;
 
 type PumpOutcome =
   | { kind: "result"; result: SDKResultMessage }
@@ -247,17 +248,21 @@ export class LettaAcpAgent {
       alwaysAllowed: new Set(),
       cancelled: false,
       modeId: this.config.permissionMode,
+      cwd: options.cwd,
     };
     this.sessions.set(sessionId, state);
     return { sessionId, state };
   }
 
   private announceCommands(sessionId: string, cx: AgentContext): void {
+    const cwd = this.sessions.get(sessionId)?.cwd ?? process.cwd();
+    const availableCommands = buildAvailableCommands(cwd);
+    log(`advertising ${availableCommands.length} slash commands`);
     void cx.notify(methods.client.session.update, {
       sessionId,
       update: {
         sessionUpdate: "available_commands_update",
-        availableCommands: AVAILABLE_COMMANDS,
+        availableCommands,
       },
     });
   }
@@ -317,8 +322,10 @@ export class LettaAcpAgent {
   }
 
   /**
-   * Handles slash commands advertised via available_commands_update without
-   * involving the LLM. Returns null when the prompt is not a command.
+   * Handles slash commands that have a non-LLM implementation: /model runs in
+   * the adapter, and execute_command-backed commands run in the harness.
+   * Returns null for everything else — unknown /names fall through as prompt
+   * text, which is how skill invocations reach the model.
    */
   private async maybeRunCommand(
     params: PromptRequest,
@@ -327,9 +334,15 @@ export class LettaAcpAgent {
   ): Promise<PromptResponse | null> {
     const first = params.prompt[0];
     if (params.prompt.length !== 1 || first?.type !== "text") return null;
-    const match = first.text.trim().match(/^\/model(?:\s+(.*))?$/);
+    const match = first.text.trim().match(/^\/([a-z0-9-]+)(?:\s+([\s\S]*))?$/i);
     if (!match) return null;
-    const argument = match[1]?.trim();
+    const command = (match[1] ?? "").toLowerCase();
+    const argument = match[2]?.trim();
+
+    if (isExecuteCommand(command)) {
+      return this.runExecuteCommand(params.sessionId, state, cx, command, argument);
+    }
+    if (command !== "model") return null;
 
     const reply = async (text: string) => {
       await cx.notify(methods.client.session.update, {
@@ -367,6 +380,69 @@ export class LettaAcpAgent {
       );
     }
     return { stopReason: "end_turn" };
+  }
+
+  /**
+   * Dispatches a slash command to the harness via the app-server protocol's
+   * execute_command, forwarding any resulting agent-turn events (e.g. /init
+   * and /remember run full turns) and finishing on the slash_command_end
+   * stream delta that carries the command's output.
+   */
+  private async runExecuteCommand(
+    sessionId: string,
+    state: AcpSessionState,
+    cx: AgentContext,
+    command: string,
+    argument: string | undefined,
+  ): Promise<PromptResponse> {
+    log(`executing /${command} via execute_command`);
+    await state.session.sendCommand({
+      type: "execute_command",
+      command_id: command,
+      request_id: `acp-${crypto.randomUUID()}`,
+      runtime: {
+        agent_id: state.session.agentId,
+        conversation_id: state.session.conversationId,
+      },
+      ...(argument ? { args: argument } : {}),
+    });
+
+    for (let round = 0; round < EXECUTE_COMMAND_MAX_ROUNDS; round++) {
+      for await (const message of state.session.stream()) {
+        if (state.cancelled) return { stopReason: "cancelled" };
+        if (message.type === "stream_event") {
+          const event = message.event as Record<string, unknown>;
+          if (
+            event.message_type === "slash_command_end" &&
+            event.command_id === command
+          ) {
+            const output = typeof event.output === "string" ? event.output : "";
+            const success = event.success !== false;
+            if (output) {
+              await cx.notify(methods.client.session.update, {
+                sessionId,
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: success ? output : `/${command} failed: ${output}`,
+                  },
+                },
+              });
+            }
+            return { stopReason: "end_turn" };
+          }
+          continue;
+        }
+        // Commands like /init and /remember run a full agent turn; forward
+        // its events and swallow the turn's own result message — the
+        // slash_command_end delta is the terminal signal.
+        if (message.type !== "result") {
+          await this.forwardMessage(sessionId, state, message, cx);
+        }
+      }
+    }
+    throw new Error(`/${command} did not complete`);
   }
 
   /**
