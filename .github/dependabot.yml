@@ -1,0 +1,15 @@
+# Auto-open bump PRs when @letta-ai dependencies (letta-agent-sdk) publish new
+# versions. Scoped to @letta-ai/* so unrelated dependency churn stays out.
+# versioning-strategy: increase makes in-range releases (e.g. ^0.2.6 -> 0.2.7)
+# still produce a PR that moves the manifest + lockfile forward.
+version: 2
+updates:
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    allow:
+      - dependency-name: "@letta-ai/*"
+    versioning-strategy: "increase"
+    commit-message:
+      prefix: "chore"
