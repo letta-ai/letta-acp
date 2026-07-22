@@ -11,6 +11,16 @@ Built on [`@letta-ai/letta-agent-sdk`](https://github.com/letta-ai/letta-agent-s
 
 ## Quick start
 
+Install from npm:
+
+```bash
+npm install -g @letta-ai/letta-acp   # provides the `letta-acp` command
+# or run it without installing:
+npx -y @letta-ai/letta-acp
+```
+
+Or work from source:
+
 ```bash
 git clone git@github.com:letta-ai/letta-acp.git
 cd letta-acp
@@ -33,13 +43,16 @@ Add to Zed's `settings.json`:
 {
   "agent_servers": {
     "Letta": {
-      "command": "bun",
-      "args": ["/path/to/letta-acp/src/index.ts"],
+      "command": "npx",
+      "args": ["-y", "@letta-ai/letta-acp"],
       "env": { "LETTA_AGENT_ID": "agent-..." }
     }
   }
 }
 ```
+
+(From a source checkout, use `"command": "bun"`,
+`"args": ["/path/to/letta-acp/src/index.ts"]` instead.)
 
 Then open the Agent Panel, choose **Letta**, and start a thread.
 
