@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
-      # Required for --provenance: npm signs the publish via GitHub OIDC.
+      # Required for OIDC trusted publishing (and its automatic provenance).
       id-token: write
 
     steps:
@@ -42,9 +42,9 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          # node-pty's install-time gyp rebuild requires node-gyp@latest, which
-          # itself needs Node >= 22.
-          node-version: 22
+          # Node 24 bundles npm >= 11.5, required for OIDC trusted publishing.
+          # (node-pty's install-time gyp rebuild also needs Node >= 22.)
+          node-version: 24
           registry-url: "https://registry.npmjs.org"
 
       - name: Bump version
@@ -139,11 +139,9 @@ jobs:
             Changes from ${{ steps.version.outputs.old_version }} to ${{ steps.version.outputs.new_version }}
           generate_release_notes: true
 
-      # Provenance requires a public source repo and the job's id-token: write
-      # permission (npm signs the publish via OIDC). A further step would be
-      # OIDC trusted publishing like letta-agent-sdk (no NPM_TOKEN at all),
-      # configured per-package in the npmjs UI.
+      # OIDC trusted publishing (like letta-agent-sdk / letta-code): the npmjs
+      # package settings trust this repo + release.yml, so no NPM_TOKEN is
+      # needed and the publish is provenance-signed automatically. Requires
+      # npm >= 11.5 (Node 24) and the job's id-token: write permission.
       - name: Publish to npm
-        run: npm publish --access public --provenance --tag ${{ steps.version.outputs.npm_tag }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --tag ${{ steps.version.outputs.npm_tag }}
