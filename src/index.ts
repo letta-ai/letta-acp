@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * letta-acp — ACP v1 agent adapter for Letta.
  *
