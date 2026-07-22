@@ -1,0 +1,18 @@
+# Auto-open bump PRs when @letta-ai dependencies (letta-agent-sdk) publish new
+# versions, mirroring letta-agent-sdk's config for letta-code bumps. The bun
+# ecosystem keeps the committed bun.lock in sync with the manifest.
+# versioning-strategy: increase makes in-range releases (e.g. ^0.2.6 -> 0.2.7)
+# still produce a PR that moves the manifest + lockfile forward.
+version: 2
+updates:
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    allow:
+      - dependency-name: "@letta-ai/*"
+    versioning-strategy: "increase"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps):"
