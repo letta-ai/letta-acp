@@ -59,9 +59,20 @@ to `bun`, e.g. `~/.bun/bin/bun`, since Zed may not have it on its PATH.)
 Then open the Agent Panel, click the **+** button (or the dropdown arrow next
 to it), and choose **Letta** from the external agents list to start a thread.
 
+To drive a **Letta Cloud** agent from Zed without putting an API key in
+`settings.json`, run `letta login` once and use the
+[`cloud-oauth`](#letta-cloud-via-oauth-cloud-oauth) backend:
+
+```json
+"env": {
+  "LETTA_ACP_BACKEND": "cloud-oauth",
+  "LETTA_AGENT_ID": "agent-..."
+}
+```
+
 ## Configuration
 
-The adapter reaches Letta through one of three backends, selected with
+The adapter reaches Letta through one of four backends, selected with
 `LETTA_ACP_BACKEND` ([self-hosting docs](https://docs.letta.com/self-hosting)).
 Each subsection below shows the full `env` block for that backend.
 
@@ -78,6 +89,31 @@ sandbox. Get an API key at
   "LETTA_AGENT_ID": "agent-..."
 }
 ```
+
+### Letta Cloud via OAuth (`cloud-oauth`)
+
+Same cloud agents as `cloud`, but authenticated with your existing
+`letta login` session instead of an API key — so no long-lived secret has to
+be pasted into your editor's settings file.
+
+```json
+"env": {
+  "LETTA_ACP_BACKEND": "cloud-oauth",
+  "LETTA_AGENT_ID": "agent-..."
+}
+```
+
+Run `letta login` once, then start a thread. Credentials are resolved by the
+letta-code harness exactly as the CLI does it: OAuth tokens from your OS
+keychain (macOS Keychain, Windows Credential Manager, libsecret), refreshed
+automatically as they expire, falling back to `LETTA_API_KEY` if one is set.
+
+Mechanically this is the `local` backend with the harness pointed at Letta
+Cloud (`harnessBackend: "api"`): the SDK spawns a loopback app-server on your
+machine, the agent and its memory live in Cloud (real `agent-*` ids, cloud-side
+models), and — unlike `cloud` — built-in tools such as `Read` and `Bash`
+execute against **your** filesystem rather than a cloud sandbox. For editor use
+that's usually what you want.
 
 ### Local runtime (`local`, default)
 
@@ -126,7 +162,7 @@ non-loopback deployments enable auth
 
 Note on tool execution: with `remote` and `cloud`, built-in tools (Read, Bash,
 …) run where the harness runs — the server/sandbox filesystem, not your
-machine. The editor fs tools (`read_editor_buffer`, `write_via_editor`) always
+machine. With `local` and `cloud-oauth` they run on your machine. The editor fs tools (`read_editor_buffer`, `write_via_editor`) always
 operate on the editor's files regardless of backend, since they execute in the
 adapter and delegate to the ACP client.
 
