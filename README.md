@@ -43,6 +43,7 @@ Add to Zed's `settings.json`:
 {
   "agent_servers": {
     "Letta": {
+      "type": "custom",
       "command": "npx",
       "args": ["-y", "@letta-ai/letta-acp"],
       "env": { "LETTA_AGENT_ID": "agent-..." }
@@ -51,10 +52,12 @@ Add to Zed's `settings.json`:
 }
 ```
 
-(From a source checkout, use `"command": "bun"`,
-`"args": ["/path/to/letta-acp/src/index.ts"]` instead.)
+(From a source checkout, use `"command": "/path/to/bun"`,
+`"args": ["/path/to/letta-acp/src/index.ts"]` instead — use the full path
+to `bun`, e.g. `~/.bun/bin/bun`, since Zed may not have it on its PATH.)
 
-Then open the Agent Panel, choose **Letta**, and start a thread.
+Then open the Agent Panel, click the **+** button (or the dropdown arrow next
+to it), and choose **Letta** from the external agents list to start a thread.
 
 ## Configuration
 
