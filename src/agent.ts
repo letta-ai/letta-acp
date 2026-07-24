@@ -464,16 +464,24 @@ export class LettaAcpAgent {
       if (message.type === "result") {
         return { kind: "result", result: message };
       }
-      if (message.type === "loop_status" && mode === "recovery") {
-        if (message.status === "WAITING_ON_INPUT") {
-          idleStatusCount += 1;
-          // The first idle status can be stale (queued before the resume);
-          // trust it once we've seen real activity or it repeats.
-          if (sawActivity || idleStatusCount >= 2 || state.cancelled) {
-            return { kind: "idle" };
-          }
+      if (message.type === "loop_status") {
+        // An abort that lands before the run produces output never gets a
+        // terminal result from the SDK — the return to WAITING_ON_INPUT is
+        // the only end-of-turn signal, in "turn" mode too.
+        if (message.status === "WAITING_ON_INPUT" && state.cancelled) {
+          return { kind: "idle" };
         }
-        continue;
+        if (mode === "recovery") {
+          if (message.status === "WAITING_ON_INPUT") {
+            idleStatusCount += 1;
+            // The first idle status can be stale (queued before the resume);
+            // trust it once we've seen real activity or it repeats.
+            if (sawActivity || idleStatusCount >= 2) {
+              return { kind: "idle" };
+            }
+          }
+          continue;
+        }
       }
       const forwarded = await this.forwardMessage(
         sessionId,
