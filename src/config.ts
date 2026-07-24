@@ -4,7 +4,7 @@ import type {
 } from "@letta-ai/letta-agent-sdk";
 
 export interface LettaAcpConfig {
-  /** Letta backend client options (local | remote | cloud). */
+  /** Letta backend client options (local | remote | cloud | cloud-oauth). */
   clientOptions: LettaCodeClientOptions;
   /** Reuse an existing agent instead of creating one on first session. */
   agentId?: string;
@@ -19,6 +19,8 @@ const PERMISSION_MODES: PermissionMode[] = [
   "acceptEdits",
   "unrestricted",
 ];
+
+const BACKENDS = ["local", "remote", "cloud", "cloud-oauth"] as const;
 
 export function configFromEnv(
   env: Record<string, string | undefined> = process.env,
@@ -40,14 +42,29 @@ export function configFromEnv(
     case "cloud": {
       const apiKey = env.LETTA_API_KEY;
       if (!apiKey) {
-        throw new Error("LETTA_ACP_BACKEND=cloud requires LETTA_API_KEY");
+        throw new Error(
+          "LETTA_ACP_BACKEND=cloud requires LETTA_API_KEY. " +
+            'To use your existing `letta login` session instead, set LETTA_ACP_BACKEND="cloud-oauth".',
+        );
       }
       clientOptions = { backend: "cloud", apiKey };
       break;
     }
+    case "cloud-oauth":
+      // Cloud agents authenticated through the letta-code harness rather than
+      // an explicit API key: the SDK spawns a local app-server pointed at
+      // Letta Cloud, and that harness resolves credentials the same way the
+      // CLI does (OS keychain tokens from `letta login`, with automatic
+      // refresh, falling back to LETTA_API_KEY when present). Tools still
+      // execute on this machine.
+      clientOptions = {
+        backend: "local",
+        appServer: { harnessBackend: "api" },
+      };
+      break;
     default:
       throw new Error(
-        `Unknown LETTA_ACP_BACKEND "${backend}" (expected local | remote | cloud)`,
+        `Unknown LETTA_ACP_BACKEND "${backend}" (expected ${BACKENDS.join(" | ")})`,
       );
   }
 
