@@ -42,9 +42,12 @@ import {
 } from "./slash-commands.js";
 import {
   accumulateToolInput,
+  parseToolOutput,
   type ToolCallInputState,
+  toolDiffContent,
   toolKind,
   toolLocations,
+  toolOutputLine,
   toolTitle,
 } from "./tool-info.js";
 
@@ -56,6 +59,8 @@ interface AcpSessionState {
   lastToolCall: { id: string; name: string } | null;
   /** Accumulated SDK argument fragments, keyed by tool call id. */
   toolInputs: Map<string, ToolCallInputState>;
+  /** Tool calls whose ACP card already contains a native diff. */
+  diffToolCalls: Set<string>;
   /** Tools the user chose "always allow" for, scoped to this session. */
   alwaysAllowed: Set<string>;
   cancelled: boolean;
@@ -257,6 +262,7 @@ export class LettaAcpAgent {
       clientContext: options.clientContext,
       lastToolCall: null,
       toolInputs: new Map(),
+      diffToolCalls: new Set(),
       alwaysAllowed: new Set(),
       cancelled: false,
       modeId: this.config.permissionMode,
@@ -567,6 +573,13 @@ export class LettaAcpAgent {
           message.toolInput,
         );
         state.toolInputs.set(message.toolCallId, accumulated);
+        const diffContent = toolDiffContent(
+          message.toolName,
+          accumulated.input,
+        );
+        if (diffContent.length > 0) {
+          state.diffToolCalls.add(message.toolCallId);
+        }
         await cx.notify(methods.client.session.update, {
           sessionId,
           update: {
@@ -577,27 +590,42 @@ export class LettaAcpAgent {
             status: "in_progress",
             rawInput: accumulated.input,
             locations: toolLocations(accumulated.input),
+            ...(diffContent.length > 0 ? { content: diffContent } : {}),
           },
         });
         return true;
       }
-      case "tool_result":
+      case "tool_result": {
+        const input = state.toolInputs.get(message.toolCallId)?.input;
+        const hasDiff = state.diffToolCalls.has(message.toolCallId);
+        const rawOutput = parseToolOutput(message.content);
         state.toolInputs.delete(message.toolCallId);
+        state.diffToolCalls.delete(message.toolCallId);
+        const locations = input
+          ? toolLocations(input, toolOutputLine(rawOutput))
+          : [];
         await cx.notify(methods.client.session.update, {
           sessionId,
           update: {
             sessionUpdate: "tool_call_update",
             toolCallId: message.toolCallId,
             status: message.isError ? "failed" : "completed",
-            content: [
-              {
-                type: "content",
-                content: { type: "text", text: message.content },
-              },
-            ],
+            rawOutput,
+            ...(locations.length > 0 ? { locations } : {}),
+            ...(!hasDiff || message.isError
+              ? {
+                  content: [
+                    {
+                      type: "content" as const,
+                      content: { type: "text" as const, text: message.content },
+                    },
+                  ],
+                }
+              : {}),
           },
         });
         return true;
+      }
       case "error":
         log(`stream error: ${message.message}`);
         return false;

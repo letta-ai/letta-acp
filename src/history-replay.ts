@@ -1,5 +1,12 @@
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
-import { toolKind, toolTitle } from "./tool-info.js";
+import {
+  parseToolOutput,
+  toolDiffContent,
+  toolKind,
+  toolLocations,
+  toolOutputLine,
+  toolTitle,
+} from "./tool-info.js";
 
 /**
  * Raw Letta API history messages (session.listMessages) -> ACP session/update
@@ -8,6 +15,8 @@ import { toolKind, toolTitle } from "./tool-info.js";
  */
 export function historyToUpdates(messages: unknown[]): SessionUpdate[] {
   const updates: SessionUpdate[] = [];
+  const toolInputs = new Map<string, Record<string, unknown>>();
+  const diffToolCalls = new Set<string>();
   for (const raw of messages) {
     if (!raw || typeof raw !== "object") continue;
     const message = raw as Record<string, unknown>;
@@ -60,6 +69,9 @@ export function historyToUpdates(messages: unknown[]): SessionUpdate[] {
         if (!toolCallId) break;
         const toolName = readString(toolCall, ["name"]) ?? "tool";
         const input = parseArguments(toolCall.arguments);
+        const diffContent = toolDiffContent(toolName, input);
+        toolInputs.set(toolCallId, input);
+        if (diffContent.length > 0) diffToolCalls.add(toolCallId);
         updates.push({
           sessionUpdate: "tool_call",
           toolCallId,
@@ -67,6 +79,8 @@ export function historyToUpdates(messages: unknown[]): SessionUpdate[] {
           kind: toolKind(toolName),
           status: "completed",
           rawInput: input,
+          locations: toolLocations(input),
+          ...(diffContent.length > 0 ? { content: diffContent } : {}),
         });
         break;
       }
@@ -75,11 +89,22 @@ export function historyToUpdates(messages: unknown[]): SessionUpdate[] {
         if (!toolCallId) break;
         const text =
           extractText(message.tool_return) ?? extractText(message.content);
+        const failed = message.status === "error";
+        const rawOutput = text !== undefined ? parseToolOutput(text) : undefined;
+        const input = toolInputs.get(toolCallId);
+        const hasDiff = diffToolCalls.has(toolCallId);
+        toolInputs.delete(toolCallId);
+        diffToolCalls.delete(toolCallId);
+        const locations = input
+          ? toolLocations(input, toolOutputLine(rawOutput))
+          : [];
         updates.push({
           sessionUpdate: "tool_call_update",
           toolCallId,
-          status: message.status === "error" ? "failed" : "completed",
-          ...(text
+          status: failed ? "failed" : "completed",
+          ...(rawOutput !== undefined ? { rawOutput } : {}),
+          ...(locations.length > 0 ? { locations } : {}),
+          ...(text && (!hasDiff || failed)
             ? {
                 content: [
                   { type: "content", content: { type: "text", text } },
