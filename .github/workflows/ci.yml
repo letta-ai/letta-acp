@@ -37,7 +37,7 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Typecheck and build
+      - name: Typecheck, test, and build
         run: bun run check
 
       - name: Pack and install as a consumer
