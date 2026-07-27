@@ -14,6 +14,8 @@ interface EditorToolContext {
   getPromptContext: () => AgentContext | null;
 }
 
+const DEFAULT_EDITOR_REQUEST_TIMEOUT_MS = 30_000;
+
 /**
  * External tools that delegate file access to the ACP client (the editor).
  *
@@ -26,6 +28,7 @@ interface EditorToolContext {
 export function createEditorTools(
   caps: EditorFsCapabilities,
   context: EditorToolContext,
+  requestTimeoutMs = DEFAULT_EDITOR_REQUEST_TIMEOUT_MS,
 ): AnyAgentTool[] {
   const tools: AnyAgentTool[] = [];
   if (caps.readTextFile) {
@@ -58,12 +61,21 @@ export function createEditorTools(
       execute: async (_toolCallId, args) => {
         const { path, line, limit } = readFsArgs(args, { allowRange: true });
         const cx = requireContext(context);
-        const response = await cx.request(methods.client.fs.readTextFile, {
-          sessionId: context.getSessionId(),
-          path,
-          ...(line !== undefined ? { line } : {}),
-          ...(limit !== undefined ? { limit } : {}),
-        });
+        const response = await withEditorRequestTimeout(
+          (signal) =>
+            cx.request(
+              methods.client.fs.readTextFile,
+              {
+                sessionId: context.getSessionId(),
+                path,
+                ...(line !== undefined ? { line } : {}),
+                ...(limit !== undefined ? { limit } : {}),
+              },
+              { cancellationSignal: signal },
+            ),
+          `read ${path}`,
+          requestTimeoutMs,
+        );
         return { content: [{ type: "text", text: response.content }] };
       },
     });
@@ -100,11 +112,20 @@ export function createEditorTools(
           throw new Error("content must be a string");
         }
         const cx = requireContext(context);
-        await cx.request(methods.client.fs.writeTextFile, {
-          sessionId: context.getSessionId(),
-          path,
-          content,
-        });
+        await withEditorRequestTimeout(
+          (signal) =>
+            cx.request(
+              methods.client.fs.writeTextFile,
+              {
+                sessionId: context.getSessionId(),
+                path,
+                content,
+              },
+              { cancellationSignal: signal },
+            ),
+          `write ${path}`,
+          requestTimeoutMs,
+        );
         return {
           content: [{ type: "text", text: `Wrote ${path} via the editor.` }],
         };
@@ -112,6 +133,32 @@ export function createEditorTools(
     });
   }
   return tools;
+}
+
+async function withEditorRequestTimeout<T>(
+  request: (signal: AbortSignal) => Promise<T>,
+  description: string,
+  timeoutMs: number,
+): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(
+        `Editor request timed out after ${timeoutMs}ms while trying to ${description}`,
+      );
+      reject(error);
+      // ACP cancellation is cooperative, so the local timeout above is what
+      // guarantees the tool returns even when the client is completely stuck.
+      controller.abort(error);
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([request(controller.signal), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function requireContext(context: EditorToolContext): AgentContext {
