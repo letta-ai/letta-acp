@@ -10,8 +10,8 @@ export interface EditorFsCapabilities {
 interface EditorToolContext {
   /** ACP session these tools are bound to (assigned once known). */
   getSessionId: () => string;
-  /** Returns the in-flight prompt's ACP context, or null between turns. */
-  getPromptContext: () => AgentContext | null;
+  /** Returns the connection-scoped ACP client context for this session. */
+  getClientContext: () => AgentContext | null;
 }
 
 const DEFAULT_EDITOR_REQUEST_TIMEOUT_MS = 30_000;
@@ -162,9 +162,9 @@ async function withEditorRequestTimeout<T>(
 }
 
 function requireContext(context: EditorToolContext): AgentContext {
-  const cx = context.getPromptContext();
+  const cx = context.getClientContext();
   if (!cx) {
-    throw new Error("No active ACP prompt; editor tools are unavailable");
+    throw new Error("ACP client connection is unavailable");
   }
   return cx;
 }
