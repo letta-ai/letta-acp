@@ -17,6 +17,11 @@ export interface LettaAcpConfig {
    * ACP client has no obligation to answer. Defaults to five minutes.
    */
   outOfTurnPermissionTimeoutMs?: number;
+  /**
+   * How long a turn stays open after the server reports completion while still
+   * listing active runs. Defaults to 30 seconds.
+   */
+  prematureResultGraceMs?: number;
 }
 
 const PERMISSION_MODES: PermissionMode[] = [
