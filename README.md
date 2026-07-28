@@ -103,8 +103,10 @@ be pasted into your editor's settings file.
 }
 ```
 
-Run `letta login` once, then start a thread. Credentials are resolved by the
-letta-code harness exactly as the CLI does it: OAuth tokens from your OS
+Run `letta login` once, then start a thread. ACP clients with terminal-auth
+support can also launch this login flow directly from the agent setup UI.
+Credentials are resolved by the letta-code harness exactly as the CLI does it:
+OAuth tokens from your OS
 keychain (macOS Keychain, Windows Credential Manager, libsecret), refreshed
 automatically as they expire, falling back to `LETTA_API_KEY` if one is set.
 

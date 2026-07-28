@@ -17,7 +17,12 @@
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { LettaAcpAgent } from "./agent.js";
+import { runTerminalLogin } from "./auth.js";
 import { configFromEnv } from "./config.js";
+
+if (process.argv.includes("--login")) {
+  process.exit(await runTerminalLogin());
+}
 
 const agent = new LettaAcpAgent(configFromEnv());
 
