@@ -18,6 +18,7 @@ import {
   type StopReason,
 } from "@agentclientprotocol/sdk";
 import {
+  type CanUseToolContext,
   type CanUseToolResponse,
   LettaAgentClient,
   type LettaCodeSession,
@@ -257,8 +258,17 @@ export class LettaAcpAgent {
       cwd: options.cwd,
       model: this.config.model,
       permissionMode: "standard" as const,
-      canUseTool: (toolName: string, toolInput: Record<string, unknown>) =>
-        this.requestToolPermission(ref.sessionId, toolName, toolInput),
+      canUseTool: (
+        toolName: string,
+        toolInput: Record<string, unknown>,
+        context?: CanUseToolContext,
+      ) =>
+        this.requestToolPermission(
+          ref.sessionId,
+          toolName,
+          toolInput,
+          context,
+        ),
       ...(editorTools.length > 0 ? { tools: editorTools } : {}),
     };
     const session = options.resumeId
@@ -689,6 +699,7 @@ export class LettaAcpAgent {
     sessionId: string,
     toolName: string,
     toolInput: Record<string, unknown>,
+    context: CanUseToolContext | undefined,
   ): Promise<CanUseToolResponse> {
     const state = this.sessions.get(sessionId);
     if (!state) {
@@ -714,6 +725,7 @@ export class LettaAcpAgent {
       state.clientContext,
       toolName,
       toolInput,
+      context,
     );
   }
 
@@ -723,20 +735,29 @@ export class LettaAcpAgent {
     cx: AgentContext,
     toolName: string,
     toolInput: Record<string, unknown>,
+    context: CanUseToolContext | undefined,
   ): Promise<CanUseToolResponse> {
     if (modeAutoAllows(state.modeId, toolName)) {
       log(`auto-allowing ${toolName} (mode ${state.modeId})`);
       return { behavior: "allow", updatedInput: toolInput };
     }
-    log(`permission requested for ${toolName}`);
+    log(
+      `permission requested for ${toolName}` +
+        (state.promptActive ? "" : " (outside a prompt turn)"),
+    );
     if (state.alwaysAllowed.has(toolName)) {
       return { behavior: "allow", updatedInput: toolInput };
     }
 
+    // The approval carries the id of the tool call it belongs to. Without it
+    // the client gets a permission card that matches no streamed tool call:
+    // guessing by name attaches to the wrong card when several calls are in
+    // flight, and the synthetic id orphans the card entirely.
     const toolCallId =
-      state.lastToolCall?.name === toolName
+      context?.toolCallId ??
+      (state.lastToolCall?.name === toolName
         ? state.lastToolCall.id
-        : `${toolName}_${crypto.randomUUID()}`;
+        : `${toolName}_${crypto.randomUUID()}`);
     const params = {
       sessionId,
       toolCall: {

@@ -85,7 +85,14 @@ class FakeAppServer {
     });
   }
 
-  requestPermissionAfterPrompt(): void {
+  requestPermissionAfterPrompt(
+    overrides: {
+      requestId?: string;
+      toolName?: string;
+      toolCallId?: string;
+      input?: Record<string, unknown>;
+    } = {},
+  ): void {
     const socket = this.activeControlSocket;
     const runtime = this.activeRuntime;
     if (!socket || !runtime) {
@@ -93,13 +100,13 @@ class FakeAppServer {
     }
     socket.push({
       type: "control_request",
-      request_id: "approval-request-after-prompt",
+      request_id: overrides.requestId ?? "approval-request-after-prompt",
       runtime,
       request: {
         subtype: "can_use_tool",
-        tool_name: "Bash",
-        tool_call_id: "call-after-prompt",
-        input: {
+        tool_name: overrides.toolName ?? "Bash",
+        tool_call_id: overrides.toolCallId ?? "call-after-prompt",
+        input: overrides.input ?? {
           command: "pwd",
           description: "Show working directory after prompt",
         },
@@ -494,6 +501,48 @@ describe("Agent SDK app-server integration", () => {
       );
       // Out-of-turn requests carry a deadline the client can observe.
       expect(permissionSignals.at(-1)).toBeInstanceOf(AbortSignal);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("attaches a permission request to the tool call it belongs to", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, permissionRequests } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      // Leaves a streamed Bash call as the most recent one, so name matching
+      // cannot find the Write call the approval is actually for.
+      await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "fragmented prompt" }],
+        },
+        context,
+      );
+
+      const approval = server.nextApprovalResponse();
+      server.requestPermissionAfterPrompt({
+        requestId: "approval-unrelated-tool",
+        toolName: "Write",
+        toolCallId: "call-write",
+        input: { file_path: "/tmp/example.ts" },
+      });
+      await approval;
+
+      // A synthetic id here would render a permission card the client can
+      // never reconcile with the tool call in the stream.
+      expect(permissionRequests.at(-1)).toEqual(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            toolCallId: "call-write",
+            title: "Write: /tmp/example.ts",
+            kind: "edit",
+          }),
+        }),
+      );
     } finally {
       agent.shutdown();
     }
