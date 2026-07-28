@@ -27,6 +27,7 @@ import {
   type SDKMessage,
   type SDKResultMessage,
 } from "@letta-ai/letta-agent-sdk";
+import { authMethodsForClient } from "./auth.js";
 import type { LettaAcpConfig } from "./config.js";
 import {
   createEditorTools,
@@ -163,7 +164,10 @@ export class LettaAcpAgent {
           embeddedContext: true,
         },
       },
-      authMethods: [],
+      authMethods: authMethodsForClient(
+        params.clientCapabilities,
+        this.config.clientOptions.backend === "local",
+      ),
     };
   }
 
