@@ -22,6 +22,52 @@ describe("fragmented tool arguments", () => {
     expect(toolTitle("Bash", complete.input)).toBe(
       "Bash: Show working tree status",
     );
+    expect(complete.complete).toBe(true);
+  });
+
+  test("reports everything received while arguments are still partial", () => {
+    const first = accumulateToolInput(undefined, '{"command":"git log"', {
+      raw: '{"command":"git log"',
+    });
+    const second = accumulateToolInput(first, ',"description":"Show the ', {
+      raw: ',"description":"Show the ',
+    });
+
+    expect(second.complete).toBe(false);
+    // Not just the trailing fragment, which would drop what the client was
+    // already shown.
+    expect(second.input).toEqual({
+      raw: '{"command":"git log","description":"Show the ',
+    });
+  });
+
+  test("treats a self-contained fragment as a re-emission, not a continuation", () => {
+    // The SDK reports streamed deltas and assembled messages through the same
+    // shape, so the whole argument string can arrive twice. Appending would
+    // leave `{...}{...}` in the buffer, which never parses again.
+    const args = { command: "pwd", description: "Print working directory" };
+    const raw = JSON.stringify(args);
+    const first = accumulateToolInput(undefined, raw, args);
+    const repeated = accumulateToolInput(first, raw, args);
+
+    expect(repeated.rawArguments).toBe(raw);
+    expect(repeated.input).toEqual(args);
+    expect(repeated.complete).toBe(true);
+
+    const afterPartial = accumulateToolInput(
+      { rawArguments: '{"command":', input: {}, complete: false },
+      raw,
+      args,
+    );
+    expect(afterPartial.input).toEqual(args);
+  });
+
+  test("keeps arguments that are not JSON at all", () => {
+    const state = accumulateToolInput(undefined, "not json", {
+      raw: "not json",
+    });
+    expect(state.complete).toBe(false);
+    expect(state.input).toEqual({ raw: "not json" });
   });
 
   test("preserves complete input when the SDK emits one message", () => {

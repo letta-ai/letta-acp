@@ -37,8 +37,18 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Typecheck, test, and build
+      # bun test includes the deterministic acpx client compatibility suite.
+      - name: Typecheck, test (including acpx), and build
         run: bun run check
+
+      # Keep the credential on trusted main-branch code. Pull requests still run
+      # the deterministic acpx suite above, including forks and Dependabot.
+      - name: Create a Letta Cloud session through acpx
+        if: github.event_name == 'push'
+        env:
+          LETTA_API_KEY: ${{ secrets.LETTA_API_KEY }}
+          LETTA_ACP_TEST_AGENT_ID: ${{ vars.LETTA_ACP_TEST_AGENT_ID }}
+        run: bun run test:acpx:live
 
       - name: Pack and install as a consumer
         shell: bash

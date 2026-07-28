@@ -34,11 +34,14 @@
     "prepare": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:acpx": "bun test test/acpx-client.test.ts",
+    "test:acpx:live": "bun test/acpx-live.ts",
     "test:client": "bun test-client.ts",
     "check": "bun run test && bun run typecheck && bun run build"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",
+    "acpx": "0.13.0",
     "typescript": "^5.9.0"
   },
   "dependencies": {
