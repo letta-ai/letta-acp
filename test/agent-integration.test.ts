@@ -217,14 +217,6 @@ class FakeAppServer {
       this.reportIdleWhileRunning(socket, runtime, { thenContinue: false });
       return;
     }
-    if (promptText.includes("busy idle prompt")) {
-      this.reportIdleWhileRunning(socket, runtime, { thenContinue: true });
-      return;
-    }
-    if (promptText.includes("silent idle prompt")) {
-      this.reportIdleWhileRunning(socket, runtime, { thenContinue: false });
-      return;
-    }
 
     const isApprovalPrompt = promptText.includes("approval prompt");
     if (isApprovalPrompt) {
@@ -254,6 +246,41 @@ class FakeAppServer {
         message_type: "stop_reason",
         run_id: "run-approval",
         stop_reason: "requires_approval",
+      });
+      return;
+    }
+
+    if (promptText.includes("edit prompt")) {
+      this.pushDelta(socket, runtime, {
+        message_type: "tool_call_message",
+        run_id: "run-edit",
+        tool_calls: [
+          {
+            id: "call-edit",
+            name: "Edit",
+            arguments: JSON.stringify({
+              file_path: "/tmp/example.ts",
+              old_string: "const value = 1;",
+              new_string: "const value = 2;",
+            }),
+          },
+        ],
+      });
+      this.pushDelta(socket, runtime, {
+        message_type: "tool_return_message",
+        run_id: "run-edit",
+        tool_call_id: "call-edit",
+        tool_return: JSON.stringify({
+          message: "Successfully replaced 1 occurrence",
+          replacements: 1,
+          startLine: 12,
+        }),
+        status: "success",
+      });
+      this.pushDelta(socket, runtime, {
+        message_type: "stop_reason",
+        run_id: "run-edit",
+        stop_reason: "end_turn",
       });
       return;
     }
@@ -484,9 +511,6 @@ describe("Agent SDK app-server integration", () => {
       );
       expect(result).toEqual({ stopReason: "end_turn" });
 
-      // One card, one completing update, one result: the middle fragment is
-      // unparseable and must not overwrite the card with a partial title, and
-      // the continuation chunks must not open duplicate cards.
       expect(
         updates.filter((update) => update.toolCallId === "call-fragmented"),
       ).toEqual([
@@ -515,6 +539,7 @@ describe("Agent SDK app-server integration", () => {
           sessionUpdate: "tool_call_update",
           toolCallId: "call-fragmented",
           status: "completed",
+          rawOutput: "nothing to commit",
           content: [
             {
               type: "content",
@@ -523,6 +548,58 @@ describe("Agent SDK app-server integration", () => {
           ],
         },
       ]);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("renders an SDK Edit call as a native ACP diff", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, updates } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      const result = await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "edit prompt" }],
+        },
+        context,
+      );
+
+      expect(result).toEqual({ stopReason: "end_turn" });
+      expect(updates).toContainEqual(
+        expect.objectContaining({
+          sessionUpdate: "tool_call",
+          toolCallId: "call-edit",
+          content: [
+            {
+              type: "diff",
+              path: "/tmp/example.ts",
+              oldText: "const value = 1;",
+              newText: "const value = 2;",
+            },
+          ],
+        }),
+      );
+      const completed = updates.find(
+        (update) =>
+          update.sessionUpdate === "tool_call_update" &&
+          update.toolCallId === "call-edit" &&
+          update.status === "completed",
+      );
+      expect(completed).toEqual(
+        expect.objectContaining({
+          rawOutput: {
+            message: "Successfully replaced 1 occurrence",
+            replacements: 1,
+            startLine: 12,
+          },
+          locations: [{ path: "/tmp/example.ts", line: 12 }],
+        }),
+      );
+      expect(completed).not.toHaveProperty("content");
     } finally {
       agent.shutdown();
     }
@@ -760,17 +837,19 @@ describe("Agent SDK app-server integration", () => {
         request_id: "approval-request-1",
         decision: { behavior: "allow" },
       });
-      expect(updates).toContainEqual({
-        sessionUpdate: "tool_call_update",
-        toolCallId: "call-approval",
-        status: "completed",
-        content: [
-          {
-            type: "content",
-            content: { type: "text", text: "write completed" },
-          },
-        ],
-      });
+      expect(updates).toContainEqual(
+        expect.objectContaining({
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-approval",
+          status: "completed",
+          content: [
+            {
+              type: "content",
+              content: { type: "text", text: "write completed" },
+            },
+          ],
+        }),
+      );
       expect(updates).toContainEqual({
         sessionUpdate: "agent_message_chunk",
         content: { type: "text", text: "APPROVAL_OK" },
