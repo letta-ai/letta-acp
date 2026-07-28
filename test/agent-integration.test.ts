@@ -23,7 +23,9 @@ class FakeAppServer {
   private nextConversation = 0;
   private activeControlSocket: ServerSocket | null = null;
   private activeRuntime: RuntimeScope | null = null;
+  private activeCommand: string | null = null;
   private approvalWaiters: Array<(payload: WireMessage) => void> = [];
+  private commandWaiters: Array<() => void> = [];
 
   socketConstructor(): LettaCodeSocketConstructor {
     const server = this;
@@ -83,6 +85,13 @@ class FakeAppServer {
   nextApprovalResponse(): Promise<WireMessage> {
     return new Promise((resolve) => {
       this.approvalWaiters.push(resolve);
+    });
+  }
+
+  /** Resolves when the adapter dispatches its next execute_command. */
+  nextCommand(): Promise<void> {
+    return new Promise((resolve) => {
+      this.commandWaiters.push(resolve);
     });
   }
 
@@ -172,6 +181,9 @@ class FakeAppServer {
       case "input":
         this.handleInput(socket, message);
         return;
+      case "execute_command":
+        this.handleCommand(socket, message);
+        return;
       case "abort_message":
         socket.push({
           type: "abort_message_response",
@@ -181,6 +193,16 @@ class FakeAppServer {
           ),
           success: true,
         });
+        if (this.activeCommand) {
+          socket.push({
+            type: "update_loop_status",
+            runtime: this.activeRuntime,
+            loop_status: {
+              status: "WAITING_ON_INPUT",
+              active_run_ids: [],
+            },
+          });
+        }
         return;
       default:
         throw new Error(`Unhandled fake app-server command: ${String(message.type)}`);
@@ -196,17 +218,18 @@ class FakeAppServer {
     if (payload.kind === "approval_response") {
       this.approvalResponses.push(payload);
       for (const waiter of this.approvalWaiters.splice(0)) waiter(payload);
+      const command = this.activeCommand;
       this.pushDelta(socket, runtime, {
         message_type: "tool_return_message",
-        run_id: "run-approval",
-        tool_call_id: "call-approval",
+        run_id: command ? "run-command-approval" : "run-approval",
+        tool_call_id: command ? "call-command-approval" : "call-approval",
         tool_return: "write completed",
         status: "success",
       });
       this.pushDelta(socket, runtime, {
         message_type: "assistant_message",
-        run_id: "run-approval",
-        content: "APPROVAL_OK",
+        run_id: command ? "run-command-approval" : "run-approval",
+        content: command ? "COMMAND_APPROVAL_OK" : "APPROVAL_OK",
       });
       socket.push({
         type: "update_loop_status",
@@ -216,6 +239,15 @@ class FakeAppServer {
           active_run_ids: [],
         },
       });
+      if (command) {
+        this.pushDelta(socket, runtime, {
+          message_type: "slash_command_end",
+          command_id: command,
+          success: true,
+          output: "COMMAND_APPROVAL_OK",
+        });
+        this.activeCommand = null;
+      }
       return;
     }
 
@@ -313,6 +345,55 @@ class FakeAppServer {
       message_type: "stop_reason",
       run_id: "run-prompt",
       stop_reason: "end_turn",
+    });
+  }
+
+  private handleCommand(socket: ServerSocket, message: WireMessage): void {
+    const runtime = message.runtime as RuntimeScope;
+    const command = requiredString(
+      message.command_id,
+      "execute_command.command_id",
+    );
+    this.activeControlSocket = socket;
+    this.activeRuntime = runtime;
+    this.activeCommand = command;
+    for (const waiter of this.commandWaiters.splice(0)) waiter();
+
+    this.pushDelta(socket, runtime, {
+      message_type: "slash_command_start",
+      command_id: command,
+    });
+    if (command === "init") {
+      // Stay silent until the test cancels, reproducing an abort before the
+      // command's nested turn emits its first substantive event.
+      return;
+    }
+    this.pushDelta(socket, runtime, {
+      message_type: "tool_call_message",
+      run_id: "run-command-approval",
+      tool_calls: [
+        {
+          id: "call-command-approval",
+          name: "Write",
+          arguments: JSON.stringify({ file_path: "/tmp/command-test.txt" }),
+        },
+      ],
+    });
+    socket.push({
+      type: "control_request",
+      request_id: "command-approval-request",
+      runtime,
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Write",
+        tool_call_id: "call-command-approval",
+        input: { file_path: "/tmp/command-test.txt" },
+      },
+    });
+    this.pushDelta(socket, runtime, {
+      message_type: "stop_reason",
+      run_id: "run-command-approval",
+      stop_reason: "requires_approval",
     });
   }
 
@@ -434,8 +515,11 @@ function createAgent(
   });
 }
 
-function createContext(options: { answerPermissions?: boolean } = {}) {
+function createContext(
+  options: { answerPermissions?: boolean; permissionDelayMs?: number } = {},
+) {
   const answerPermissions = options.answerPermissions ?? true;
+  const permissionDelayMs = options.permissionDelayMs ?? 0;
   const updates: WireMessage[] = [];
   const permissionRequests: WireMessage[] = [];
   const permissionSignals: Array<AbortSignal | undefined> = [];
@@ -451,6 +535,9 @@ function createContext(options: { answerPermissions?: boolean } = {}) {
       permissionRequests.push(params);
       permissionSignals.push(requestOptions?.cancellationSignal);
       if (!answerPermissions) return new Promise(() => {});
+      if (permissionDelayMs > 0) {
+        await Bun.sleep(permissionDelayMs);
+      }
       return {
         outcome: { outcome: "selected" as const, optionId: "allow_once" },
       };
@@ -897,6 +984,65 @@ describe("Agent SDK app-server integration", () => {
         sessionUpdate: "agent_message_chunk",
         content: { type: "text", text: "APPROVAL_OK" },
       });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("recovers an execute command after an approved tool call", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, updates, permissionRequests } = createContext({
+      permissionDelayMs: 10,
+    });
+
+    try {
+      const session = await openSession(agent, context);
+      const result = await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "/remember command fact" }],
+        },
+        context,
+      );
+
+      expect(result).toEqual({ stopReason: "end_turn" });
+      expect(permissionRequests).toHaveLength(1);
+      expect(permissionRequests[0]).toMatchObject({
+        sessionId: session.sessionId,
+        toolCall: {
+          toolCallId: "call-command-approval",
+          title: "Write: /tmp/command-test.txt",
+        },
+      });
+      expect(updates).toContainEqual({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "COMMAND_APPROVAL_OK" },
+      });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("cancels an execute command before its first turn event", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      const commandStarted = server.nextCommand();
+      const prompt = agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "/init" }],
+        },
+        context,
+      );
+      await commandStarted;
+      await agent.cancel({ sessionId: session.sessionId });
+
+      expect(await prompt).toEqual({ stopReason: "cancelled" });
     } finally {
       agent.shutdown();
     }
