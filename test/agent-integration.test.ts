@@ -209,6 +209,22 @@ class FakeAppServer {
       this.streamFragmentedToolCall(socket, runtime);
       return;
     }
+    if (promptText.includes("busy idle prompt")) {
+      this.reportIdleWhileRunning(socket, runtime, { thenContinue: true });
+      return;
+    }
+    if (promptText.includes("silent idle prompt")) {
+      this.reportIdleWhileRunning(socket, runtime, { thenContinue: false });
+      return;
+    }
+    if (promptText.includes("busy idle prompt")) {
+      this.reportIdleWhileRunning(socket, runtime, { thenContinue: true });
+      return;
+    }
+    if (promptText.includes("silent idle prompt")) {
+      this.reportIdleWhileRunning(socket, runtime, { thenContinue: false });
+      return;
+    }
 
     const isApprovalPrompt = promptText.includes("approval prompt");
     if (isApprovalPrompt) {
@@ -289,6 +305,50 @@ class FakeAppServer {
     });
   }
 
+  /**
+   * Reports WAITING_ON_INPUT while still listing an active run — the shape
+   * that makes the SDK synthesize a successful, stop-reason-less result even
+   * though the agent is mid-step. `thenContinue` decides whether the run
+   * really was still going (after a beat, as a real server would take) or
+   * whether the status was simply stale and nothing more arrives.
+   */
+  private reportIdleWhileRunning(
+    socket: ServerSocket,
+    runtime: RuntimeScope,
+    options: { thenContinue: boolean },
+  ): void {
+    this.pushDelta(socket, runtime, {
+      message_type: "assistant_message",
+      run_id: "run-first",
+      content: "WORKING",
+    });
+    socket.push({
+      type: "update_loop_status",
+      runtime,
+      loop_status: {
+        status: "WAITING_ON_INPUT",
+        active_run_ids: ["run-second"],
+      },
+    });
+    if (!options.thenContinue) return;
+    // A real server takes a beat before the next step; without the delay the
+    // continuation lands in the same microtask batch and hides the race.
+    setTimeout(() => {
+      this.pushDelta(socket, runtime, {
+        message_type: "assistant_message",
+        run_id: "run-second",
+        content: "STILL_WORKING",
+      });
+      // The turn tracker was already consumed by the contradicted result, so
+      // the run ends the way post-approval rounds do: on a real idle status.
+      socket.push({
+        type: "update_loop_status",
+        runtime,
+        loop_status: { status: "WAITING_ON_INPUT", active_run_ids: [] },
+      });
+    }, 20);
+  }
+
   private pushDelta(
     socket: ServerSocket,
     runtime: RuntimeScope,
@@ -307,7 +367,10 @@ function requiredString(value: unknown, label: string): string {
 
 function createAgent(
   server: FakeAppServer,
-  overrides: { outOfTurnPermissionTimeoutMs?: number } = {},
+  overrides: {
+    outOfTurnPermissionTimeoutMs?: number;
+    prematureResultGraceMs?: number;
+  } = {},
 ): LettaAcpAgent {
   return new LettaAcpAgent({
     clientOptions: {
@@ -615,6 +678,56 @@ describe("Agent SDK app-server integration", () => {
         }),
       );
       expect(permissionSignals.at(-1)?.aborted).toBe(true);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("keeps the turn open when the server is still running a job", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, updates } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      const result = await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "busy idle prompt" }],
+        },
+        context,
+      );
+
+      expect(result).toEqual({ stopReason: "end_turn" });
+      // Returning at the first (contradicted) completion would end the prompt
+      // before this arrived, stranding the rest of the turn outside it.
+      expect(updates).toContainEqual({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "STILL_WORKING" },
+      });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("ends the turn when a contradicted completion is never followed up", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server, { prematureResultGraceMs: 20 });
+    const { context } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      // The status was simply stale: nothing follows it. The grace period has
+      // to expire on its own, or the prompt would hang forever.
+      const result = await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "silent idle prompt" }],
+        },
+        context,
+      );
+
+      expect(result).toEqual({ stopReason: "end_turn" });
     } finally {
       agent.shutdown();
     }

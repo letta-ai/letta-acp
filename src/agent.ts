@@ -90,11 +90,20 @@ const LOAD_HISTORY_LIMIT = 200;
  */
 const DEFAULT_OUT_OF_TURN_PERMISSION_TIMEOUT_MS = 300_000;
 
+/**
+ * How long to keep a turn open after the server reported completion while
+ * still listing active runs. Long enough to cover the next model step, short
+ * enough that a server which never speaks again cannot wedge the prompt.
+ */
+const DEFAULT_PREMATURE_RESULT_GRACE_MS = 30_000;
+
 /** Safety cap on stream rounds while waiting for a slash command to finish. */
 const EXECUTE_COMMAND_MAX_ROUNDS = 50;
 
 type PumpOutcome =
   | { kind: "result"; result: SDKResultMessage }
+  /** Turn reported complete while the server still listed active runs. */
+  | { kind: "premature"; result: SDKResultMessage }
   | { kind: "idle" }
   | { kind: "stream_end" };
 
@@ -116,6 +125,7 @@ export class LettaAcpAgent {
   private readonly config: LettaAcpConfig;
   private readonly client: LettaAgentClient;
   private readonly outOfTurnPermissionTimeoutMs: number;
+  private readonly prematureResultGraceMs: number;
   private readonly sessions = new Map<string, AcpSessionState>();
   private agentIdPromise: Promise<string> | null = null;
   private clientFsCaps: EditorFsCapabilities = {
@@ -129,6 +139,8 @@ export class LettaAcpAgent {
     this.outOfTurnPermissionTimeoutMs =
       config.outOfTurnPermissionTimeoutMs ??
       DEFAULT_OUT_OF_TURN_PERMISSION_TIMEOUT_MS;
+    this.prematureResultGraceMs =
+      config.prematureResultGraceMs ?? DEFAULT_PREMATURE_RESULT_GRACE_MS;
   }
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
@@ -340,19 +352,33 @@ export class LettaAcpAgent {
       // first round to its result, then pump recovery rounds (blocking on the
       // stream while approvals resolve) until the run goes idle.
       let mode: "turn" | "recovery" = "turn";
+      let graceMs: number | undefined;
       while (true) {
         const outcome = await this.pumpStream(
           params.sessionId,
           state,
           cx,
           mode,
+          graceMs,
         );
         if (state.cancelled) return { stopReason: "cancelled" };
         switch (outcome.kind) {
+          case "premature": {
+            // The SDK ends its stream on any result, so the only way to stay
+            // with the run is another round — the same recovery the
+            // approval_conflict path uses, but on a deadline in case the
+            // server really was done.
+            const runIds = outcome.result.runIds?.join(", ") ?? "unknown";
+            log(`turn reported complete while runs are active (${runIds})`);
+            mode = "recovery";
+            graceMs = this.prematureResultGraceMs;
+            continue;
+          }
           case "result": {
             const result = outcome.result;
             if (!result.success && result.errorCode === "approval_conflict") {
               mode = "recovery";
+              graceMs = undefined;
               continue;
             }
             return this.toPromptResponse(state, result);
@@ -509,14 +535,46 @@ export class LettaAcpAgent {
     state: AcpSessionState,
     cx: AgentContext,
     mode: "turn" | "recovery",
+    firstMessageDeadlineMs?: number,
   ): Promise<PumpOutcome> {
     let sawActivity = false;
     let idleStatusCount = 0;
-    for await (const message of state.session.stream()) {
+    let activeRunIds: readonly string[] = [];
+
+    const stream = state.session.stream()[Symbol.asyncIterator]();
+    let awaitingFirstMessage = true;
+    while (true) {
+      const pending = stream.next();
+      // Only the first message of a grace round is raced: a server that went
+      // quiet after contradicting itself must not wedge the prompt.
+      const step =
+        awaitingFirstMessage && firstMessageDeadlineMs !== undefined
+          ? await raceDeadline(pending, firstMessageDeadlineMs)
+          : await pending;
+      if (!step) {
+        log("no further activity during the grace round; ending turn");
+        return { kind: "idle" };
+      }
+      awaitingFirstMessage = false;
+      if (step.done) break;
+      const message = step.value;
+
       if (message.type === "result") {
+        // An idle loop status that still lists active runs makes the SDK
+        // synthesize a successful, stop-reason-less turn result. Taking it at
+        // face value ends the prompt mid-run, stranding the tool calls that
+        // are still streaming and pushing their approvals outside the turn.
+        if (
+          message.success &&
+          message.stopReason == null &&
+          activeRunIds.length > 0
+        ) {
+          return { kind: "premature", result: message };
+        }
         return { kind: "result", result: message };
       }
       if (message.type === "loop_status") {
+        activeRunIds = message.activeRunIds;
         // An abort that lands before the run produces output never gets a
         // terminal result from the SDK — the return to WAITING_ON_INPUT is
         // the only end-of-turn signal, in "turn" mode too.
@@ -855,6 +913,23 @@ export class LettaAcpAgent {
       `created agent ${agentId} — set LETTA_AGENT_ID=${agentId} to keep using it`,
     );
     return agentId;
+  }
+}
+
+/** Awaits `pending`, or resolves null when the deadline expires first. */
+async function raceDeadline<T>(
+  pending: Promise<T>,
+  timeoutMs: number,
+): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([pending, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
