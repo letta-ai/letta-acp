@@ -33,6 +33,8 @@ export function toolKind(toolName: string): ToolKind {
 export interface ToolCallInputState {
   rawArguments: string;
   input: Record<string, unknown>;
+  /** True once `rawArguments` parsed into a JSON object. */
+  complete: boolean;
 }
 
 /** Accumulate one SDK argument fragment and parse it once complete. */
@@ -42,20 +44,41 @@ export function accumulateToolInput(
   parsedFragment: Record<string, unknown>,
 ): ToolCallInputState {
   const rawArguments = `${previous?.rawArguments ?? ""}${fragment ?? ""}`;
-  if (rawArguments) {
-    try {
-      const parsed = JSON.parse(rawArguments);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return {
-          rawArguments,
-          input: parsed as Record<string, unknown>,
-        };
-      }
-    } catch {
-      // More fragments may still arrive.
-    }
+  const accumulated = parseArgumentObject(rawArguments);
+  if (accumulated) {
+    return { rawArguments, input: accumulated, complete: true };
   }
-  return { rawArguments, input: parsedFragment };
+
+  // The SDK emits streamed deltas and assembled messages through the same
+  // tool_call shape, so a fragment that parses on its own is a re-emission of
+  // the whole argument string rather than a continuation. Replace the buffer:
+  // appending would leave `{...}{...}`, which can never parse again.
+  const whole = parseArgumentObject(fragment);
+  if (whole) {
+    return { rawArguments: fragment ?? "", input: whole, complete: true };
+  }
+
+  // Still partial. Report everything received so far rather than the trailing
+  // fragment alone, matching how the SDK surfaces unparseable arguments.
+  if (!rawArguments) {
+    return { rawArguments, input: parsedFragment, complete: false };
+  }
+  return { rawArguments, input: { raw: rawArguments }, complete: false };
+}
+
+function parseArgumentObject(
+  text: string | undefined,
+): Record<string, unknown> | null {
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Incomplete JSON, or arguments that were never JSON to begin with.
+  }
+  return null;
 }
 
 /** Native ACP diff content for file-edit tools once their input is complete. */

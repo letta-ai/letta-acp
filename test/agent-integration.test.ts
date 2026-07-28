@@ -22,6 +22,7 @@ class FakeAppServer {
   private nextConversation = 0;
   private activeControlSocket: ServerSocket | null = null;
   private activeRuntime: RuntimeScope | null = null;
+  private approvalWaiters: Array<(payload: WireMessage) => void> = [];
 
   socketConstructor(): LettaCodeSocketConstructor {
     const server = this;
@@ -77,7 +78,21 @@ class FakeAppServer {
     return FakeSocket as unknown as LettaCodeSocketConstructor;
   }
 
-  requestPermissionAfterPrompt(): void {
+  /** Resolves with the next approval_response the adapter sends back. */
+  nextApprovalResponse(): Promise<WireMessage> {
+    return new Promise((resolve) => {
+      this.approvalWaiters.push(resolve);
+    });
+  }
+
+  requestPermissionAfterPrompt(
+    overrides: {
+      requestId?: string;
+      toolName?: string;
+      toolCallId?: string;
+      input?: Record<string, unknown>;
+    } = {},
+  ): void {
     const socket = this.activeControlSocket;
     const runtime = this.activeRuntime;
     if (!socket || !runtime) {
@@ -85,13 +100,13 @@ class FakeAppServer {
     }
     socket.push({
       type: "control_request",
-      request_id: "approval-request-after-prompt",
+      request_id: overrides.requestId ?? "approval-request-after-prompt",
       runtime,
       request: {
         subtype: "can_use_tool",
-        tool_name: "Bash",
-        tool_call_id: "call-after-prompt",
-        input: {
+        tool_name: overrides.toolName ?? "Bash",
+        tool_call_id: overrides.toolCallId ?? "call-after-prompt",
+        input: overrides.input ?? {
           command: "pwd",
           description: "Show working directory after prompt",
         },
@@ -138,6 +153,16 @@ class FakeAppServer {
       case "input":
         this.handleInput(socket, message);
         return;
+      case "abort_message":
+        socket.push({
+          type: "abort_message_response",
+          request_id: requiredString(
+            message.request_id,
+            "abort_message.request_id",
+          ),
+          success: true,
+        });
+        return;
       default:
         throw new Error(`Unhandled fake app-server command: ${String(message.type)}`);
     }
@@ -151,6 +176,7 @@ class FakeAppServer {
 
     if (payload.kind === "approval_response") {
       this.approvalResponses.push(payload);
+      for (const waiter of this.approvalWaiters.splice(0)) waiter(payload);
       this.pushDelta(socket, runtime, {
         message_type: "tool_return_message",
         run_id: "run-approval",
@@ -178,8 +204,21 @@ class FakeAppServer {
       throw new Error(`Unhandled fake input payload: ${String(payload.kind)}`);
     }
 
-    const serializedMessages = JSON.stringify(payload.messages);
-    const isApprovalPrompt = serializedMessages.includes("approval prompt");
+    const promptText = JSON.stringify(payload.messages);
+    if (promptText.includes("fragmented prompt")) {
+      this.streamFragmentedToolCall(socket, runtime);
+      return;
+    }
+    if (promptText.includes("busy idle prompt")) {
+      this.reportIdleWhileRunning(socket, runtime, { thenContinue: true });
+      return;
+    }
+    if (promptText.includes("silent idle prompt")) {
+      this.reportIdleWhileRunning(socket, runtime, { thenContinue: false });
+      return;
+    }
+
+    const isApprovalPrompt = promptText.includes("approval prompt");
     if (isApprovalPrompt) {
       this.pushDelta(socket, runtime, {
         message_type: "tool_call_message",
@@ -211,7 +250,7 @@ class FakeAppServer {
       return;
     }
 
-    if (serializedMessages.includes("edit prompt")) {
+    if (promptText.includes("edit prompt")) {
       this.pushDelta(socket, runtime, {
         message_type: "tool_call_message",
         run_id: "run-edit",
@@ -258,6 +297,85 @@ class FakeAppServer {
     });
   }
 
+  /**
+   * Streams one tool call as the app-server really does: an opening chunk
+   * carrying the name plus a slice of the arguments, then continuation chunks
+   * that carry argument text only (and therefore no tool name).
+   */
+  private streamFragmentedToolCall(
+    socket: ServerSocket,
+    runtime: RuntimeScope,
+  ): void {
+    const fragments = [
+      { name: "Bash", arguments: '{"command":"git status"' },
+      { arguments: ',"description":"Show the ' },
+      { arguments: 'working tree status"}' },
+    ];
+    for (const fragment of fragments) {
+      this.pushDelta(socket, runtime, {
+        message_type: "tool_call_message",
+        run_id: "run-fragmented",
+        tool_calls: [{ id: "call-fragmented", ...fragment }],
+      });
+    }
+    this.pushDelta(socket, runtime, {
+      message_type: "tool_return_message",
+      run_id: "run-fragmented",
+      tool_call_id: "call-fragmented",
+      tool_return: "nothing to commit",
+      status: "success",
+    });
+    this.pushDelta(socket, runtime, {
+      message_type: "stop_reason",
+      run_id: "run-fragmented",
+      stop_reason: "end_turn",
+    });
+  }
+
+  /**
+   * Reports WAITING_ON_INPUT while still listing an active run — the shape
+   * that makes the SDK synthesize a successful, stop-reason-less result even
+   * though the agent is mid-step. `thenContinue` decides whether the run
+   * really was still going (after a beat, as a real server would take) or
+   * whether the status was simply stale and nothing more arrives.
+   */
+  private reportIdleWhileRunning(
+    socket: ServerSocket,
+    runtime: RuntimeScope,
+    options: { thenContinue: boolean },
+  ): void {
+    this.pushDelta(socket, runtime, {
+      message_type: "assistant_message",
+      run_id: "run-first",
+      content: "WORKING",
+    });
+    socket.push({
+      type: "update_loop_status",
+      runtime,
+      loop_status: {
+        status: "WAITING_ON_INPUT",
+        active_run_ids: ["run-second"],
+      },
+    });
+    if (!options.thenContinue) return;
+    // A real server takes a beat before the next step; without the delay the
+    // continuation lands in the same microtask batch and hides the race.
+    setTimeout(() => {
+      this.pushDelta(socket, runtime, {
+        message_type: "assistant_message",
+        run_id: "run-second",
+        content: "STILL_WORKING",
+      });
+      // The turn tracker was already consumed by the contradicted result, so
+      // the run ends the way post-approval rounds do: on a real idle status.
+      socket.push({
+        type: "update_loop_status",
+        runtime,
+        loop_status: { status: "WAITING_ON_INPUT", active_run_ids: [] },
+      });
+    }, 20);
+  }
+
   private pushDelta(
     socket: ServerSocket,
     runtime: RuntimeScope,
@@ -274,7 +392,13 @@ function requiredString(value: unknown, label: string): string {
   return value;
 }
 
-function createAgent(server: FakeAppServer): LettaAcpAgent {
+function createAgent(
+  server: FakeAppServer,
+  overrides: {
+    outOfTurnPermissionTimeoutMs?: number;
+    prematureResultGraceMs?: number;
+  } = {},
+): LettaAcpAgent {
   return new LettaAcpAgent({
     clientOptions: {
       backend: "local",
@@ -286,24 +410,33 @@ function createAgent(server: FakeAppServer): LettaAcpAgent {
     },
     agentId: "agent-test",
     permissionMode: "standard",
+    ...overrides,
   });
 }
 
-function createContext() {
+function createContext(options: { answerPermissions?: boolean } = {}) {
+  const answerPermissions = options.answerPermissions ?? true;
   const updates: WireMessage[] = [];
   const permissionRequests: WireMessage[] = [];
+  const permissionSignals: Array<AbortSignal | undefined> = [];
   const context = {
     notify: async (_method: unknown, params: { update: WireMessage }) => {
       updates.push(params.update);
     },
-    request: async (_method: unknown, params: WireMessage) => {
+    request: async (
+      _method: unknown,
+      params: WireMessage,
+      requestOptions?: { cancellationSignal?: AbortSignal },
+    ) => {
       permissionRequests.push(params);
+      permissionSignals.push(requestOptions?.cancellationSignal);
+      if (!answerPermissions) return new Promise(() => {});
       return {
         outcome: { outcome: "selected" as const, optionId: "allow_once" },
       };
     },
   } as unknown as AgentContext;
-  return { context, updates, permissionRequests };
+  return { context, updates, permissionRequests, permissionSignals };
 }
 
 async function openSession(agent: LettaAcpAgent, context: AgentContext) {
@@ -357,6 +490,64 @@ describe("Agent SDK app-server integration", () => {
         sessionUpdate: "agent_message_chunk",
         content: { type: "text", text: "PROMPT_OK" },
       });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("streams fragmented tool arguments as one tool card", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, updates } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      const result = await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "fragmented prompt" }],
+        },
+        context,
+      );
+      expect(result).toEqual({ stopReason: "end_turn" });
+
+      expect(
+        updates.filter((update) => update.toolCallId === "call-fragmented"),
+      ).toEqual([
+        {
+          sessionUpdate: "tool_call",
+          toolCallId: "call-fragmented",
+          title: "Bash",
+          kind: "execute",
+          status: "in_progress",
+          rawInput: { raw: '{"command":"git status"' },
+          locations: [],
+        },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-fragmented",
+          title: "Bash: Show the working tree status",
+          kind: "execute",
+          status: "in_progress",
+          rawInput: {
+            command: "git status",
+            description: "Show the working tree status",
+          },
+          locations: [],
+        },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-fragmented",
+          status: "completed",
+          rawOutput: "nothing to commit",
+          content: [
+            {
+              type: "content",
+              content: { type: "text", text: "nothing to commit" },
+            },
+          ],
+        },
+      ]);
     } finally {
       agent.shutdown();
     }
@@ -417,7 +608,7 @@ describe("Agent SDK app-server integration", () => {
   test("routes a permission request after the prompt handler returns", async () => {
     const server = new FakeAppServer();
     const agent = createAgent(server);
-    const { context, permissionRequests } = createContext();
+    const { context, permissionRequests, permissionSignals } = createContext();
 
     try {
       const session = await openSession(agent, context);
@@ -430,15 +621,16 @@ describe("Agent SDK app-server integration", () => {
       );
       expect(result).toEqual({ stopReason: "end_turn" });
 
+      const approval = server.nextApprovalResponse();
       server.requestPermissionAfterPrompt();
-      for (
-        let attempt = 0;
-        attempt < 20 && server.approvalResponses.length === 0;
-        attempt += 1
-      ) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
 
+      expect(await approval).toEqual(
+        expect.objectContaining({
+          kind: "approval_response",
+          request_id: "approval-request-after-prompt",
+          decision: expect.objectContaining({ behavior: "allow" }),
+        }),
+      );
       expect(permissionRequests).toContainEqual(
         expect.objectContaining({
           sessionId: session.sessionId,
@@ -447,13 +639,172 @@ describe("Agent SDK app-server integration", () => {
           }),
         }),
       );
-      expect(server.approvalResponses).toContainEqual(
+      // Out-of-turn requests carry a deadline the client can observe.
+      expect(permissionSignals.at(-1)).toBeInstanceOf(AbortSignal);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("attaches a permission request to the tool call it belongs to", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, permissionRequests } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      // Leaves a streamed Bash call as the most recent one, so name matching
+      // cannot find the Write call the approval is actually for.
+      await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "fragmented prompt" }],
+        },
+        context,
+      );
+
+      const approval = server.nextApprovalResponse();
+      server.requestPermissionAfterPrompt({
+        requestId: "approval-unrelated-tool",
+        toolName: "Write",
+        toolCallId: "call-write",
+        input: { file_path: "/tmp/example.ts" },
+      });
+      await approval;
+
+      // A synthetic id here would render a permission card the client can
+      // never reconcile with the tool call in the stream.
+      expect(permissionRequests.at(-1)).toEqual(
         expect.objectContaining({
-          kind: "approval_response",
-          request_id: "approval-request-after-prompt",
-          decision: expect.objectContaining({ behavior: "allow" }),
+          toolCall: expect.objectContaining({
+            toolCallId: "call-write",
+            title: "Write: /tmp/example.ts",
+            kind: "edit",
+          }),
         }),
       );
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("denies a permission request that lands after cancellation", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, permissionRequests } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "plain prompt" }],
+        },
+        context,
+      );
+      await agent.cancel({ sessionId: session.sessionId });
+
+      const approval = server.nextApprovalResponse();
+      server.requestPermissionAfterPrompt();
+
+      expect(await approval).toEqual(
+        expect.objectContaining({
+          request_id: "approval-request-after-prompt",
+          decision: expect.objectContaining({
+            behavior: "deny",
+            message: "Prompt turn was cancelled",
+          }),
+        }),
+      );
+      // The user already pressed stop; they should not be asked again.
+      expect(permissionRequests).toEqual([]);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("denies an out-of-turn permission request the client never answers", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server, { outOfTurnPermissionTimeoutMs: 10 });
+    const { context, permissionSignals } = createContext({
+      answerPermissions: false,
+    });
+
+    try {
+      const session = await openSession(agent, context);
+      await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "plain prompt" }],
+        },
+        context,
+      );
+
+      const approval = server.nextApprovalResponse();
+      server.requestPermissionAfterPrompt();
+
+      expect(await approval).toEqual(
+        expect.objectContaining({
+          request_id: "approval-request-after-prompt",
+          decision: expect.objectContaining({
+            behavior: "deny",
+            message:
+              "Permission request timed out after 10ms while trying to " +
+              "approve Bash outside a prompt turn",
+          }),
+        }),
+      );
+      expect(permissionSignals.at(-1)?.aborted).toBe(true);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("keeps the turn open when the server is still running a job", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, updates } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      const result = await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "busy idle prompt" }],
+        },
+        context,
+      );
+
+      expect(result).toEqual({ stopReason: "end_turn" });
+      // Returning at the first (contradicted) completion would end the prompt
+      // before this arrived, stranding the rest of the turn outside it.
+      expect(updates).toContainEqual({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "STILL_WORKING" },
+      });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("ends the turn when a contradicted completion is never followed up", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server, { prematureResultGraceMs: 20 });
+    const { context } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      // The status was simply stale: nothing follows it. The grace period has
+      // to expire on its own, or the prompt would hang forever.
+      const result = await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "silent idle prompt" }],
+        },
+        context,
+      );
+
+      expect(result).toEqual({ stopReason: "end_turn" });
     } finally {
       agent.shutdown();
     }
