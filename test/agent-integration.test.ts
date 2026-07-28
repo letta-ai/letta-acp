@@ -20,6 +20,8 @@ class FakeAppServer {
   readonly runtimeStartRequestIds: string[] = [];
   readonly approvalResponses: WireMessage[] = [];
   private nextConversation = 0;
+  private activeControlSocket: ServerSocket | null = null;
+  private activeRuntime: RuntimeScope | null = null;
 
   socketConstructor(): LettaCodeSocketConstructor {
     const server = this;
@@ -75,6 +77,28 @@ class FakeAppServer {
     return FakeSocket as unknown as LettaCodeSocketConstructor;
   }
 
+  requestPermissionAfterPrompt(): void {
+    const socket = this.activeControlSocket;
+    const runtime = this.activeRuntime;
+    if (!socket || !runtime) {
+      throw new Error("No active runtime for late permission request");
+    }
+    socket.push({
+      type: "control_request",
+      request_id: "approval-request-after-prompt",
+      runtime,
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Bash",
+        tool_call_id: "call-after-prompt",
+        input: {
+          command: "pwd",
+          description: "Show working directory after prompt",
+        },
+      },
+    });
+  }
+
   private receive(socket: ServerSocket, message: WireMessage): void {
     if (socket.channel !== "control") {
       throw new Error(`Unexpected command on ${socket.channel} channel`);
@@ -122,6 +146,8 @@ class FakeAppServer {
   private handleInput(socket: ServerSocket, message: WireMessage): void {
     const runtime = message.runtime as RuntimeScope;
     const payload = message.payload as Record<string, unknown>;
+    this.activeControlSocket = socket;
+    this.activeRuntime = runtime;
 
     if (payload.kind === "approval_response") {
       this.approvalResponses.push(payload);
@@ -295,6 +321,51 @@ describe("Agent SDK app-server integration", () => {
         sessionUpdate: "agent_message_chunk",
         content: { type: "text", text: "PROMPT_OK" },
       });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("routes a permission request after the prompt handler returns", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, permissionRequests } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      const result = await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "plain prompt" }],
+        },
+        context,
+      );
+      expect(result).toEqual({ stopReason: "end_turn" });
+
+      server.requestPermissionAfterPrompt();
+      for (
+        let attempt = 0;
+        attempt < 20 && server.approvalResponses.length === 0;
+        attempt += 1
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      expect(permissionRequests).toContainEqual(
+        expect.objectContaining({
+          sessionId: session.sessionId,
+          toolCall: expect.objectContaining({
+            title: "Bash: Show working directory after prompt",
+          }),
+        }),
+      );
+      expect(server.approvalResponses).toContainEqual(
+        expect.objectContaining({
+          kind: "approval_response",
+          request_id: "approval-request-after-prompt",
+          decision: expect.objectContaining({ behavior: "allow" }),
+        }),
+      );
     } finally {
       agent.shutdown();
     }

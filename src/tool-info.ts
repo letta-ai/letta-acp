@@ -23,6 +23,34 @@ export function toolKind(toolName: string): ToolKind {
   return TOOL_KINDS[toolName] ?? "other";
 }
 
+export interface ToolCallInputState {
+  rawArguments: string;
+  input: Record<string, unknown>;
+}
+
+/** Accumulate one SDK argument fragment and parse it once complete. */
+export function accumulateToolInput(
+  previous: ToolCallInputState | undefined,
+  fragment: string | undefined,
+  parsedFragment: Record<string, unknown>,
+): ToolCallInputState {
+  const rawArguments = `${previous?.rawArguments ?? ""}${fragment ?? ""}`;
+  if (rawArguments) {
+    try {
+      const parsed = JSON.parse(rawArguments);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return {
+          rawArguments,
+          input: parsed as Record<string, unknown>,
+        };
+      }
+    } catch {
+      // More fragments may still arrive.
+    }
+  }
+  return { rawArguments, input: parsedFragment };
+}
+
 /** Short human-readable title for a tool call, e.g. `Read src/index.ts`. */
 export function toolTitle(
   toolName: string,

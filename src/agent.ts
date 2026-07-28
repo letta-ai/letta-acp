@@ -40,14 +40,22 @@ import {
   buildAvailableCommands,
   isExecuteCommand,
 } from "./slash-commands.js";
-import { toolKind, toolLocations, toolTitle } from "./tool-info.js";
+import {
+  accumulateToolInput,
+  type ToolCallInputState,
+  toolKind,
+  toolLocations,
+  toolTitle,
+} from "./tool-info.js";
 
 interface AcpSessionState {
   session: LettaCodeSession;
-  /** ACP context of the in-flight prompt; permission requests need it. */
-  promptContext: AgentContext | null;
+  /** Connection-scoped ACP client context used for requests and notifications. */
+  clientContext: AgentContext;
   /** Most recent tool_call streamed, to correlate permission requests. */
   lastToolCall: { id: string; name: string } | null;
+  /** Accumulated SDK argument fragments, keyed by tool call id. */
+  toolInputs: Map<string, ToolCallInputState>;
   /** Tools the user chose "always allow" for, scoped to this session. */
   alwaysAllowed: Set<string>;
   cancelled: boolean;
@@ -130,6 +138,7 @@ export class LettaAcpAgent {
       cwd: params.cwd,
       resumeId: null,
       agentId,
+      clientContext: cx,
     });
     log(`session ${sessionId} -> agent ${agentId} (cwd: ${params.cwd})`);
     this.announceCommands(sessionId, cx);
@@ -152,6 +161,7 @@ export class LettaAcpAgent {
       cwd: params.cwd,
       resumeId: params.sessionId,
       agentId: null,
+      clientContext: cx,
     });
     const history = await state.session.listMessages({
       order: "desc",
@@ -210,12 +220,13 @@ export class LettaAcpAgent {
     cwd: string;
     resumeId: string | null;
     agentId: string | null;
+    clientContext: AgentContext;
   }): Promise<{ sessionId: string; state: AcpSessionState }> {
     const ref = { sessionId: options.resumeId ?? "" };
     const editorTools = createEditorTools(this.clientFsCaps, {
       getSessionId: () => ref.sessionId,
-      getPromptContext: () =>
-        this.sessions.get(ref.sessionId)?.promptContext ?? null,
+      getClientContext: () =>
+        this.sessions.get(ref.sessionId)?.clientContext ?? null,
     });
     const sessionOptions = {
       cwd: options.cwd,
@@ -243,8 +254,9 @@ export class LettaAcpAgent {
     }
     const state: AcpSessionState = {
       session,
-      promptContext: null,
+      clientContext: options.clientContext,
       lastToolCall: null,
+      toolInputs: new Map(),
       alwaysAllowed: new Set(),
       cancelled: false,
       modeId: this.config.permissionMode,
@@ -275,7 +287,7 @@ export class LettaAcpAgent {
     if (!state) {
       throw new Error(`Unknown session: ${params.sessionId}`);
     }
-    state.promptContext = cx;
+    state.clientContext = cx;
     state.cancelled = false;
 
     try {
@@ -316,8 +328,6 @@ export class LettaAcpAgent {
     } catch (error) {
       if (state.cancelled) return { stopReason: "cancelled" };
       throw error;
-    } finally {
-      state.promptContext = null;
     }
   }
 
@@ -548,22 +558,31 @@ export class LettaAcpAgent {
           },
         });
         return true;
-      case "tool_call":
+      case "tool_call": {
         state.lastToolCall = { id: message.toolCallId, name: message.toolName };
+        const existing = state.toolInputs.get(message.toolCallId);
+        const accumulated = accumulateToolInput(
+          existing,
+          message.rawArguments,
+          message.toolInput,
+        );
+        state.toolInputs.set(message.toolCallId, accumulated);
         await cx.notify(methods.client.session.update, {
           sessionId,
           update: {
-            sessionUpdate: "tool_call",
+            sessionUpdate: existing ? "tool_call_update" : "tool_call",
             toolCallId: message.toolCallId,
-            title: toolTitle(message.toolName, message.toolInput),
+            title: toolTitle(message.toolName, accumulated.input),
             kind: toolKind(message.toolName),
             status: "in_progress",
-            rawInput: message.toolInput,
-            locations: toolLocations(message.toolInput),
+            rawInput: accumulated.input,
+            locations: toolLocations(accumulated.input),
           },
         });
         return true;
+      }
       case "tool_result":
+        state.toolInputs.delete(message.toolCallId);
         await cx.notify(methods.client.session.update, {
           sessionId,
           update: {
@@ -622,17 +641,16 @@ export class LettaAcpAgent {
     toolInput: Record<string, unknown>,
   ): Promise<CanUseToolResponse> {
     const state = this.sessions.get(sessionId);
-    const cx = state?.promptContext;
-    if (!state || !cx) {
+    if (!state) {
       return {
         behavior: "deny",
-        message: "No active ACP prompt to request permission from",
+        message: "Unknown ACP session",
       };
     }
     return this.resolveToolPermission(
       sessionId,
       state,
-      cx,
+      state.clientContext,
       toolName,
       toolInput,
     );

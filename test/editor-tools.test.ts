@@ -13,7 +13,7 @@ type FakeRequest = (
 function editorTool(name: string, request: FakeRequest): AnyAgentTool {
   const context = {
     getSessionId: () => "conv-test",
-    getPromptContext: () => ({ request }) as unknown as AgentContext,
+    getClientContext: () => ({ request }) as unknown as AgentContext,
   };
   const tool = createEditorTools(
     { readTextFile: true, writeTextFile: true },
