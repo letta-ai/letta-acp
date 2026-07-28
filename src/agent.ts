@@ -495,6 +495,10 @@ export class LettaAcpAgent {
     });
 
     for (let round = 0; round < EXECUTE_COMMAND_MAX_ROUNDS; round++) {
+      // A cancel can land between stream rounds after a nested command turn
+      // produced its terminal result. Do not attach another stream listener
+      // once the command has already been aborted.
+      if (state.cancelled) return { stopReason: "cancelled" };
       for await (const message of state.session.stream()) {
         if (state.cancelled) return { stopReason: "cancelled" };
         if (message.type === "stream_event") {
@@ -521,12 +525,22 @@ export class LettaAcpAgent {
           }
           continue;
         }
-        // Commands like /init and /remember run a full agent turn; forward
-        // its events and swallow the turn's own result message — the
-        // slash_command_end delta is the terminal signal.
-        if (message.type !== "result") {
-          await this.forwardMessage(sessionId, state, message, cx);
+        if (message.type === "result") {
+          // Commands like /init and /remember run a full agent turn. A
+          // successful nested result, or a recoverable approval conflict,
+          // ends this SDK stream round but not the command: its continuation
+          // and slash_command_end arrive through a subsequent stream().
+          if (
+            message.success ||
+            message.errorCode === "approval_conflict"
+          ) {
+            continue;
+          }
+          // Do not turn genuine nested-turn failures into 50 opaque recovery
+          // rounds followed by "/<command> did not complete".
+          return this.toPromptResponse(state, message);
         }
+        await this.forwardMessage(sessionId, state, message, cx);
       }
     }
     throw new Error(`/${command} did not complete`);
