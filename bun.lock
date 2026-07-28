@@ -1,12 +1,12 @@
 {
   "lockfileVersion": 1,
-  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "acp",
       "dependencies": {
         "@agentclientprotocol/sdk": "^1.3.0",
         "@letta-ai/letta-agent-sdk": "^0.5.4",
+        "@letta-ai/letta-code": "0.29.9",
       },
       "devDependencies": {
         "@types/bun": "^1.3.0",

@@ -27,6 +27,7 @@ import {
   type SDKMessage,
   type SDKResultMessage,
 } from "@letta-ai/letta-agent-sdk";
+import { authMethodsForClient } from "./auth.js";
 import type { LettaAcpConfig } from "./config.js";
 import {
   createEditorTools,
@@ -45,9 +46,12 @@ import {
 } from "./slash-commands.js";
 import {
   accumulateToolInput,
+  parseToolOutput,
   type ToolCallInputState,
+  toolDiffContent,
   toolKind,
   toolLocations,
+  toolOutputLine,
   toolTitle,
 } from "./tool-info.js";
 
@@ -55,6 +59,8 @@ interface StreamedToolCall {
   /** First non-placeholder name seen for this tool call. */
   toolName: string;
   input: ToolCallInputState;
+  /** Whether the ACP card already contains a native diff. */
+  hasDiff: boolean;
 }
 
 interface AcpSessionState {
@@ -163,7 +169,10 @@ export class LettaAcpAgent {
           embeddedContext: true,
         },
       },
-      authMethods: [],
+      authMethods: authMethodsForClient(
+        params.clientCapabilities,
+        this.config.clientOptions.backend === "local",
+      ),
     };
   }
 
@@ -674,7 +683,9 @@ export class LettaAcpAgent {
           message.rawArguments,
           message.toolInput,
         );
-        state.toolCalls.set(message.toolCallId, { toolName, input });
+        const diffContent = toolDiffContent(toolName, input.input);
+        const hasDiff = existing?.hasDiff === true || diffContent.length > 0;
+        state.toolCalls.set(message.toolCallId, { toolName, input, hasDiff });
         state.lastToolCall = { id: message.toolCallId, name: toolName };
         // Partial JSON has no usable title or locations, so hold the card
         // steady until the arguments parse rather than flickering through
@@ -695,27 +706,40 @@ export class LettaAcpAgent {
             status: "in_progress",
             rawInput: input.input,
             locations: toolLocations(input.input),
+            ...(diffContent.length > 0 ? { content: diffContent } : {}),
           },
         });
         return true;
       }
-      case "tool_result":
+      case "tool_result": {
+        const toolCall = state.toolCalls.get(message.toolCallId);
+        const rawOutput = parseToolOutput(message.content);
         state.toolCalls.delete(message.toolCallId);
+        const locations = toolCall
+          ? toolLocations(toolCall.input.input, toolOutputLine(rawOutput))
+          : [];
         await cx.notify(methods.client.session.update, {
           sessionId,
           update: {
             sessionUpdate: "tool_call_update",
             toolCallId: message.toolCallId,
             status: message.isError ? "failed" : "completed",
-            content: [
-              {
-                type: "content",
-                content: { type: "text", text: message.content },
-              },
-            ],
+            rawOutput,
+            ...(locations.length > 0 ? { locations } : {}),
+            ...(toolCall?.hasDiff !== true || message.isError
+              ? {
+                  content: [
+                    {
+                      type: "content" as const,
+                      content: { type: "text" as const, text: message.content },
+                    },
+                  ],
+                }
+              : {}),
           },
         });
         return true;
+      }
       case "error":
         log(`stream error: ${message.message}`);
         return false;
