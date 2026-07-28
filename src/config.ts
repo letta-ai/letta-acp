@@ -12,6 +12,11 @@ export interface LettaAcpConfig {
   model?: string;
   /** Letta permission mode; tool approvals are forwarded to the ACP client. */
   permissionMode: PermissionMode;
+  /**
+   * Deadline for permission requests raised outside a prompt turn, where the
+   * ACP client has no obligation to answer. Defaults to five minutes.
+   */
+  outOfTurnPermissionTimeoutMs?: number;
 }
 
 const PERMISSION_MODES: PermissionMode[] = [

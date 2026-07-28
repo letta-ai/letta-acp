@@ -1,5 +1,6 @@
 import { type AgentContext, methods } from "@agentclientprotocol/sdk";
 import type { AnyAgentTool } from "@letta-ai/letta-agent-sdk";
+import { withAcpRequestTimeout } from "./request-timeout.js";
 
 /** Client fs capabilities negotiated during ACP initialize. */
 export interface EditorFsCapabilities {
@@ -61,7 +62,7 @@ export function createEditorTools(
       execute: async (_toolCallId, args) => {
         const { path, line, limit } = readFsArgs(args, { allowRange: true });
         const cx = requireContext(context);
-        const response = await withEditorRequestTimeout(
+        const response = await withAcpRequestTimeout(
           (signal) =>
             cx.request(
               methods.client.fs.readTextFile,
@@ -73,8 +74,11 @@ export function createEditorTools(
               },
               { cancellationSignal: signal },
             ),
-          `read ${path}`,
-          requestTimeoutMs,
+          {
+            label: "Editor request",
+            description: `read ${path}`,
+            timeoutMs: requestTimeoutMs,
+          },
         );
         return { content: [{ type: "text", text: response.content }] };
       },
@@ -112,7 +116,7 @@ export function createEditorTools(
           throw new Error("content must be a string");
         }
         const cx = requireContext(context);
-        await withEditorRequestTimeout(
+        await withAcpRequestTimeout(
           (signal) =>
             cx.request(
               methods.client.fs.writeTextFile,
@@ -123,8 +127,11 @@ export function createEditorTools(
               },
               { cancellationSignal: signal },
             ),
-          `write ${path}`,
-          requestTimeoutMs,
+          {
+            label: "Editor request",
+            description: `write ${path}`,
+            timeoutMs: requestTimeoutMs,
+          },
         );
         return {
           content: [{ type: "text", text: `Wrote ${path} via the editor.` }],
@@ -133,32 +140,6 @@ export function createEditorTools(
     });
   }
   return tools;
-}
-
-async function withEditorRequestTimeout<T>(
-  request: (signal: AbortSignal) => Promise<T>,
-  description: string,
-  timeoutMs: number,
-): Promise<T> {
-  const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      const error = new Error(
-        `Editor request timed out after ${timeoutMs}ms while trying to ${description}`,
-      );
-      reject(error);
-      // ACP cancellation is cooperative, so the local timeout above is what
-      // guarantees the tool returns even when the client is completely stuck.
-      controller.abort(error);
-    }, timeoutMs);
-  });
-
-  try {
-    return await Promise.race([request(controller.signal), timeout]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
 }
 
 function requireContext(context: EditorToolContext): AgentContext {
