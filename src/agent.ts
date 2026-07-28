@@ -12,6 +12,7 @@ import {
   PROTOCOL_VERSION,
   type PromptRequest,
   type PromptResponse,
+  type RequestPermissionResponse,
   type SetSessionModeRequest,
   type SetSessionModeResponse,
   type StopReason,
@@ -31,6 +32,7 @@ import {
   type EditorFsCapabilities,
 } from "./editor-tools.js";
 import { historyToUpdates } from "./history-replay.js";
+import { withAcpRequestTimeout } from "./request-timeout.js";
 import {
   isSessionModeId,
   modeAutoAllows,
@@ -48,17 +50,25 @@ import {
   toolTitle,
 } from "./tool-info.js";
 
+interface StreamedToolCall {
+  /** First non-placeholder name seen for this tool call. */
+  toolName: string;
+  input: ToolCallInputState;
+}
+
 interface AcpSessionState {
   session: LettaCodeSession;
   /** Connection-scoped ACP client context used for requests and notifications. */
   clientContext: AgentContext;
   /** Most recent tool_call streamed, to correlate permission requests. */
   lastToolCall: { id: string; name: string } | null;
-  /** Accumulated SDK argument fragments, keyed by tool call id. */
-  toolInputs: Map<string, ToolCallInputState>;
+  /** Tool calls still streaming or running, keyed by tool call id. */
+  toolCalls: Map<string, StreamedToolCall>;
   /** Tools the user chose "always allow" for, scoped to this session. */
   alwaysAllowed: Set<string>;
   cancelled: boolean;
+  /** True only while a session/prompt handler is running. */
+  promptActive: boolean;
   /** ACP session mode; enforced adapter-side in the permission callback. */
   modeId: PermissionMode;
   /** Session working directory (for project skill discovery). */
@@ -67,6 +77,17 @@ interface AcpSessionState {
 
 /** Max history messages replayed on session/load. */
 const LOAD_HISTORY_LIMIT = 200;
+
+/**
+ * Liveness bound for permission requests raised outside a prompt turn.
+ *
+ * ACP scopes `session/request_permission` to a turn: the client's only
+ * obligation to answer is the `session/cancel` contract, which no longer
+ * applies once the prompt handler has returned. A client with no out-of-turn
+ * permission UI would leave the Letta-side tool call pending forever, so those
+ * requests get a generous-but-finite deadline. In-turn requests stay unbounded.
+ */
+const DEFAULT_OUT_OF_TURN_PERMISSION_TIMEOUT_MS = 300_000;
 
 /** Safety cap on stream rounds while waiting for a slash command to finish. */
 const EXECUTE_COMMAND_MAX_ROUNDS = 50;
@@ -93,6 +114,7 @@ const IMAGE_MEDIA_TYPES = new Set([
 export class LettaAcpAgent {
   private readonly config: LettaAcpConfig;
   private readonly client: LettaAgentClient;
+  private readonly outOfTurnPermissionTimeoutMs: number;
   private readonly sessions = new Map<string, AcpSessionState>();
   private agentIdPromise: Promise<string> | null = null;
   private clientFsCaps: EditorFsCapabilities = {
@@ -103,6 +125,9 @@ export class LettaAcpAgent {
   constructor(config: LettaAcpConfig) {
     this.config = config;
     this.client = new LettaAgentClient(config.clientOptions);
+    this.outOfTurnPermissionTimeoutMs =
+      config.outOfTurnPermissionTimeoutMs ??
+      DEFAULT_OUT_OF_TURN_PERMISSION_TIMEOUT_MS;
   }
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
@@ -256,9 +281,10 @@ export class LettaAcpAgent {
       session,
       clientContext: options.clientContext,
       lastToolCall: null,
-      toolInputs: new Map(),
+      toolCalls: new Map(),
       alwaysAllowed: new Set(),
       cancelled: false,
+      promptActive: false,
       modeId: this.config.permissionMode,
       cwd: options.cwd,
     };
@@ -289,6 +315,7 @@ export class LettaAcpAgent {
     }
     state.clientContext = cx;
     state.cancelled = false;
+    state.promptActive = true;
 
     try {
       const commandResponse = await this.maybeRunCommand(params, state, cx);
@@ -328,6 +355,11 @@ export class LettaAcpAgent {
     } catch (error) {
       if (state.cancelled) return { stopReason: "cancelled" };
       throw error;
+    } finally {
+      // The client context stays for the lifetime of the session; only the
+      // in-a-turn marker is cleared, so late tool traffic still reaches the
+      // client but waits on a deadline.
+      state.promptActive = false;
     }
   }
 
@@ -508,6 +540,9 @@ export class LettaAcpAgent {
     const state = this.sessions.get(params.sessionId);
     if (!state) return;
     state.cancelled = true;
+    // Interrupted tool calls never produce a tool_result, so drop their
+    // accumulated arguments here instead of leaking them for the session.
+    state.toolCalls.clear();
     try {
       await state.session.abort();
     } catch (error) {
@@ -559,30 +594,45 @@ export class LettaAcpAgent {
         });
         return true;
       case "tool_call": {
-        state.lastToolCall = { id: message.toolCallId, name: message.toolName };
-        const existing = state.toolInputs.get(message.toolCallId);
-        const accumulated = accumulateToolInput(
-          existing,
+        const existing = state.toolCalls.get(message.toolCallId);
+        // Continuation deltas carry an argument fragment and often no name, so
+        // the SDK reports "?" for them: the first real name wins.
+        const toolName =
+          knownToolName(message.toolName) ??
+          existing?.toolName ??
+          message.toolName;
+        const input = accumulateToolInput(
+          existing?.input,
           message.rawArguments,
           message.toolInput,
         );
-        state.toolInputs.set(message.toolCallId, accumulated);
+        state.toolCalls.set(message.toolCallId, { toolName, input });
+        state.lastToolCall = { id: message.toolCallId, name: toolName };
+        // Partial JSON has no usable title or locations, so hold the card
+        // steady until the arguments parse rather than flickering through
+        // every fragment.
+        const worthSending =
+          !existing ||
+          (input.complete &&
+            (!existing.input.complete ||
+              existing.input.rawArguments !== input.rawArguments));
+        if (!worthSending) return true;
         await cx.notify(methods.client.session.update, {
           sessionId,
           update: {
             sessionUpdate: existing ? "tool_call_update" : "tool_call",
             toolCallId: message.toolCallId,
-            title: toolTitle(message.toolName, accumulated.input),
-            kind: toolKind(message.toolName),
+            title: toolTitle(toolName, input.input),
+            kind: toolKind(toolName),
             status: "in_progress",
-            rawInput: accumulated.input,
-            locations: toolLocations(accumulated.input),
+            rawInput: input.input,
+            locations: toolLocations(input.input),
           },
         });
         return true;
       }
       case "tool_result":
-        state.toolInputs.delete(message.toolCallId);
+        state.toolCalls.delete(message.toolCallId);
         await cx.notify(methods.client.session.update, {
           sessionId,
           update: {
@@ -647,6 +697,17 @@ export class LettaAcpAgent {
         message: "Unknown ACP session",
       };
     }
+    if (state.cancelled) {
+      // The client context now outlives the turn, so nothing else stops a
+      // request that raced session/abort from prompting the user again after
+      // they pressed stop.
+      log(`denying ${toolName}: prompt turn was cancelled`);
+      return {
+        behavior: "deny",
+        message: "Prompt turn was cancelled",
+        interrupt: true,
+      };
+    }
     return this.resolveToolPermission(
       sessionId,
       state,
@@ -676,33 +737,58 @@ export class LettaAcpAgent {
       state.lastToolCall?.name === toolName
         ? state.lastToolCall.id
         : `${toolName}_${crypto.randomUUID()}`;
-    const response = await cx.request(
-      methods.client.session.requestPermission,
-      {
-        sessionId,
-        toolCall: {
-          toolCallId,
-          title: toolTitle(toolName, toolInput),
-          kind: toolKind(toolName),
-          status: "pending",
-          rawInput: toolInput,
-          locations: toolLocations(toolInput),
-        },
-        options: [
-          {
-            optionId: "allow_once",
-            name: `Allow ${toolName} once`,
-            kind: "allow_once",
-          },
-          {
-            optionId: "allow_always",
-            name: `Always allow ${toolName} this session`,
-            kind: "allow_always",
-          },
-          { optionId: "reject_once", name: "Reject", kind: "reject_once" },
-        ],
+    const params = {
+      sessionId,
+      toolCall: {
+        toolCallId,
+        title: toolTitle(toolName, toolInput),
+        kind: toolKind(toolName),
+        status: "pending" as const,
+        rawInput: toolInput,
+        locations: toolLocations(toolInput),
       },
-    );
+      options: [
+        {
+          optionId: "allow_once",
+          name: `Allow ${toolName} once`,
+          kind: "allow_once" as const,
+        },
+        {
+          optionId: "allow_always",
+          name: `Always allow ${toolName} this session`,
+          kind: "allow_always" as const,
+        },
+        {
+          optionId: "reject_once",
+          name: "Reject",
+          kind: "reject_once" as const,
+        },
+      ],
+    };
+
+    let response: RequestPermissionResponse;
+    try {
+      response = state.promptActive
+        ? await cx.request(methods.client.session.requestPermission, params)
+        : await withAcpRequestTimeout(
+            (signal) =>
+              cx.request(methods.client.session.requestPermission, params, {
+                cancellationSignal: signal,
+              }),
+            {
+              label: "Permission request",
+              description: `approve ${toolName} outside a prompt turn`,
+              timeoutMs: this.outOfTurnPermissionTimeoutMs,
+            },
+          );
+    } catch (error) {
+      log(`permission request for ${toolName} failed: ${String(error)}`);
+      return {
+        behavior: "deny",
+        message: error instanceof Error ? error.message : String(error),
+        interrupt: true,
+      };
+    }
 
     if (response.outcome.outcome === "cancelled") {
       return {
@@ -749,6 +835,16 @@ export class LettaAcpAgent {
     );
     return agentId;
   }
+}
+
+/**
+ * The SDK reports "?" when a streamed tool_call chunk omits the function name,
+ * which every continuation fragment does. Treat that as "unknown" so the name
+ * from the opening chunk survives.
+ */
+function knownToolName(toolName: string): string | undefined {
+  if (!toolName || toolName === "?") return undefined;
+  return toolName;
 }
 
 /** ACP prompt content blocks -> Letta multimodal message content. */
