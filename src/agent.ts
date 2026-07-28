@@ -929,6 +929,9 @@ export class LettaAcpAgent {
     }
     log("creating a new Letta agent (set LETTA_AGENT_ID to reuse one)...");
     const agentId = await this.client.createAgent({
+      // SDK 0.5 made personality presets opt-in. Keep the adapter's established
+      // behavior instead of silently creating a zero-memory generic agent.
+      personality: "memo",
       name: "ACP agent",
       description: "Letta agent driven by an ACP client (e.g. Zed)",
       model: this.config.model,
