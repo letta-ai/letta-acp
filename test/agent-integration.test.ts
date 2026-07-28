@@ -18,6 +18,7 @@ interface ServerSocket {
 
 class FakeAppServer {
   readonly runtimeStartRequestIds: string[] = [];
+  readonly createdAgentBodies: WireMessage[] = [];
   readonly approvalResponses: WireMessage[] = [];
   private nextConversation = 0;
   private activeControlSocket: ServerSocket | null = null;
@@ -123,21 +124,39 @@ class FakeAppServer {
       case "runtime_start": {
         const requestId = requiredString(message.request_id, "runtime_start.request_id");
         const conversationId = `conv-test-${++this.nextConversation}`;
+        const createAgent = message.create_agent as
+          | { body?: WireMessage }
+          | undefined;
+        const agentId =
+          typeof message.agent_id === "string"
+            ? message.agent_id
+            : createAgent
+              ? "agent-created"
+              : "agent-test";
         const runtime = {
-          agent_id: "agent-test",
+          agent_id: agentId,
           conversation_id: conversationId,
         };
         this.runtimeStartRequestIds.push(requestId);
+        if (createAgent?.body) this.createdAgentBodies.push(createAgent.body);
         socket.push({
           type: "runtime_start_response",
           request_id: requestId,
           success: true,
           runtime,
-          agent: { id: "agent-test", model: "test/model", tools: [] },
-          conversation: { id: conversationId, agent_id: "agent-test" },
+          agent: { id: agentId, model: "test/model", tools: [] },
+          conversation: { id: conversationId, agent_id: agentId },
         });
         return;
       }
+      case "enable_memfs":
+        socket.push({
+          type: "enable_memfs_response",
+          request_id: requiredString(message.request_id, "enable_memfs.request_id"),
+          success: true,
+          memory_directory: "/tmp/letta-acp-memory",
+        });
+        return;
       case "conversation_messages_list":
         socket.push({
           type: "conversation_messages_list_response",
@@ -395,6 +414,7 @@ function requiredString(value: unknown, label: string): string {
 function createAgent(
   server: FakeAppServer,
   overrides: {
+    agentId?: string;
     outOfTurnPermissionTimeoutMs?: number;
     prematureResultGraceMs?: number;
   } = {},
@@ -448,6 +468,29 @@ async function openSession(agent: LettaAcpAgent, context: AgentContext) {
 }
 
 describe("Agent SDK app-server integration", () => {
+  test("preserves the memo personality when creating an ACP agent", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server, { agentId: undefined });
+    const { context } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+
+      expect(session.sessionId).toBe("conv-test-2");
+      expect(server.createdAgentBodies).toHaveLength(1);
+      expect(server.createdAgentBodies[0]).toMatchObject({
+        name: "ACP agent",
+        description: "Letta agent driven by an ACP client (e.g. Zed)",
+        memory_blocks: expect.arrayContaining([
+          expect.objectContaining({ label: "persona" }),
+          expect.objectContaining({ label: "human" }),
+        ]),
+      });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
   test("starts repeated sessions with distinct runtime request ids", async () => {
     const server = new FakeAppServer();
     const agent = createAgent(server);
