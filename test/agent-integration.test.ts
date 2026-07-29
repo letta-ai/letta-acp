@@ -20,6 +20,10 @@ class FakeAppServer {
   readonly runtimeStartRequestIds: string[] = [];
   readonly createdAgentBodies: WireMessage[] = [];
   readonly approvalResponses: WireMessage[] = [];
+  /** External tool groups registered with each runtime_start. */
+  readonly externalToolGroups: unknown[] = [];
+  /** Message payloads the adapter sent as prompts, oldest first. */
+  readonly promptPayloads: WireMessage[] = [];
   private nextConversation = 0;
   private activeControlSocket: ServerSocket | null = null;
   private activeRuntime: RuntimeScope | null = null;
@@ -148,6 +152,9 @@ class FakeAppServer {
         };
         this.runtimeStartRequestIds.push(requestId);
         if (createAgent?.body) this.createdAgentBodies.push(createAgent.body);
+        if (message.external_tools !== undefined) {
+          this.externalToolGroups.push(message.external_tools);
+        }
         socket.push({
           type: "runtime_start_response",
           request_id: requestId,
@@ -255,6 +262,7 @@ class FakeAppServer {
       throw new Error(`Unhandled fake input payload: ${String(payload.kind)}`);
     }
 
+    this.promptPayloads.push(payload);
     const promptText = JSON.stringify(payload.messages);
     if (promptText.includes("fragmented prompt")) {
       this.streamFragmentedToolCall(socket, runtime);
@@ -546,10 +554,18 @@ function createContext(
   return { context, updates, permissionRequests, permissionSignals };
 }
 
-async function openSession(agent: LettaAcpAgent, context: AgentContext) {
+async function openSession(
+  agent: LettaAcpAgent,
+  context: AgentContext,
+  params: Record<string, unknown> = {},
+) {
   await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
   return agent.newSession(
-    { cwd: "/tmp/letta-acp-test", mcpServers: [] },
+    {
+      cwd: "/tmp/letta-acp-test",
+      mcpServers: [],
+      ...params,
+    } as Parameters<LettaAcpAgent["newSession"]>[0],
     context,
   );
 }
@@ -1043,6 +1059,90 @@ describe("Agent SDK app-server integration", () => {
       await agent.cancel({ sessionId: session.sessionId });
 
       expect(await prompt).toEqual({ stopReason: "cancelled" });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("identifies itself in the initialize response", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+
+    try {
+      const result = await agent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {},
+      });
+
+      expect(result.agentInfo).toMatchObject({ name: "letta-acp" });
+      expect(result.agentInfo?.version).toMatch(/^\d+\.\d+\.\d+/);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("registers MCP server tools as external tools on the session", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context } = createContext();
+
+    try {
+      await openSession(agent, context, {
+        // MCP servers are spawned in the session cwd, so it has to exist.
+        cwd: process.cwd(),
+        mcpServers: [
+          {
+            name: "buzz",
+            command: process.execPath,
+            args: [
+              new URL("./fixtures/mock-mcp-server.ts", import.meta.url).pathname,
+            ],
+            env: [],
+          },
+        ],
+      });
+
+      const registered = JSON.stringify(server.externalToolGroups);
+      expect(registered).toContain("mcp__buzz__echo");
+      expect(registered).toContain("mcp__buzz__explode");
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("delivers a client system prompt with the first prompt only", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context } = createContext();
+
+    try {
+      const session = await openSession(agent, context, {
+        systemPrompt: "You are operating inside Buzz.",
+      });
+      await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "first prompt" }],
+        },
+        context,
+      );
+      await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "second prompt" }],
+        },
+        context,
+      );
+
+      expect(server.promptPayloads).toHaveLength(2);
+      const first = JSON.stringify(server.promptPayloads[0]);
+      expect(first).toContain("You are operating inside Buzz.");
+      expect(first.indexOf("You are operating inside Buzz.")).toBeLessThan(
+        first.indexOf("first prompt"),
+      );
+      expect(JSON.stringify(server.promptPayloads[1])).not.toContain(
+        "You are operating inside Buzz.",
+      );
     } finally {
       agent.shutdown();
     }

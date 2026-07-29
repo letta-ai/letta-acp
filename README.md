@@ -81,6 +81,37 @@ To drive a **Letta Cloud** agent from Zed without putting an API key in
 }
 ```
 
+## Use from Buzz
+
+[Buzz](https://github.com/block/buzz) drives ACP agents through its `buzz-acp`
+harness: it listens for @mentions on the relay and prompts the agent, which
+replies with the `buzz` CLI. Point the harness at this adapter:
+
+```bash
+npm install -g @letta-ai/letta-acp
+
+export BUZZ_PRIVATE_KEY="nsec1..."        # the agent's Nostr key
+export BUZZ_RELAY_URL="ws://localhost:3000"
+export BUZZ_ACP_AGENT_COMMAND="letta-acp"
+export LETTA_AGENT_ID="agent-..."         # persistent Letta agent to drive
+
+buzz-acp
+```
+
+In Buzz Desktop, pick **Letta** in the agent's runtime dropdown instead.
+
+Use the `local` or `remote` backend here. The Letta harness runs `Bash` where
+*it* runs, and the agent talks to Buzz by shelling out to the `buzz` CLI — so
+tool execution has to happen on the machine that has the CLI and the
+`BUZZ_*` environment, which the `cloud` sandbox does not. `buzz-acp`
+auto-approves permission requests, so the default `standard` mode is fine;
+set `LETTA_ACP_PERMISSION_MODE=unrestricted` to skip the approval round trip
+per tool call.
+
+One Letta agent backs every channel: `buzz-acp` opens one ACP session per
+channel, each becoming its own Letta conversation on the shared agent, so
+memory carries across channels while conversations stay separate.
+
 ## Configuration
 
 The adapter reaches Letta through one of four backends, selected with
@@ -193,6 +224,8 @@ adapter and delegate to the ACP client.
 | Session modes (`session/set_mode`: standard / acceptEdits / unrestricted) | ✅ |
 | Slash commands (`available_commands_update`, ~30 commands + skills) | ✅ |
 | Client fs delegation (`fs/read_text_file`, `fs/write_text_file`) | ✅ via external tools |
+| MCP servers from `session/new` / `session/load` | ✅ stdio only, via external tools |
+| Client-supplied `systemPrompt` on `session/new` | ✅ delivered with the session's first prompt |
 | Client terminal delegation (`terminal/*`) | ❌ (planned) |
 | Plan updates (`plan` from TodoWrite) | ❌ (planned) |
 
@@ -265,3 +298,16 @@ open and the built-ins otherwise. Both go through the normal permission flow.
 Clients that don't advertise fs capabilities get no extra tools and everything
 runs Letta-side as before. Terminal delegation (`terminal/*`) is the remaining
 piece.
+
+## MCP servers (external tools)
+
+Clients pass a list of MCP servers in `session/new` and `session/load`. The
+adapter is the MCP client for those: it spawns each **stdio** server in the
+session's `cwd`, lists its tools once at session setup, and registers each as
+a Letta external tool named `mcp__<server>__<tool>`, proxying `tools/call`
+when the model invokes one. The servers are shut down with the session.
+
+A server that fails to start, or whose tool list fails, is logged to stderr
+and skipped — a broken MCP server never fails `session/new`. The http and sse
+transports are not supported (they are skipped with a warning), which is why
+`initialize` advertises no `mcpCapabilities`.

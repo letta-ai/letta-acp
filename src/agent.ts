@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import {
   type AgentContext,
   type CancelNotification,
@@ -6,6 +7,7 @@ import {
   type InitializeResponse,
   type LoadSessionRequest,
   type LoadSessionResponse,
+  type McpServer,
   methods,
   type NewSessionRequest,
   type NewSessionResponse,
@@ -34,6 +36,7 @@ import {
   type EditorFsCapabilities,
 } from "./editor-tools.js";
 import { historyToUpdates } from "./history-replay.js";
+import { connectMcpServers, type McpBridge } from "./mcp-tools.js";
 import { withAcpRequestTimeout } from "./request-timeout.js";
 import {
   isSessionModeId,
@@ -80,10 +83,25 @@ interface AcpSessionState {
   modeId: PermissionMode;
   /** Session working directory (for project skill discovery). */
   cwd: string;
+  /** MCP servers the client attached to this session. */
+  mcp: McpBridge;
+  /**
+   * Client-supplied system prompt awaiting delivery, prepended to the next
+   * prompt because Letta has no per-session system prompt to set.
+   */
+  pendingSystemPrompt: string | null;
 }
 
 /** Max history messages replayed on session/load. */
 const LOAD_HISTORY_LIMIT = 200;
+
+/**
+ * Identity reported in the `initialize` response. Harnesses that multiplex
+ * several adapters (buzz-acp, for one) branch on this and display it, so the
+ * version is read from the package rather than hard-coded and left to drift.
+ */
+const AGENT_NAME = "letta-acp";
+const AGENT_VERSION = packageVersion();
 
 /**
  * Liveness bound for permission requests raised outside a prompt turn.
@@ -162,6 +180,7 @@ export class LettaAcpAgent {
         : PROTOCOL_VERSION;
     return {
       protocolVersion,
+      agentInfo: { name: AGENT_NAME, version: AGENT_VERSION },
       agentCapabilities: {
         loadSession: true,
         promptCapabilities: {
@@ -186,6 +205,8 @@ export class LettaAcpAgent {
       resumeId: null,
       agentId,
       clientContext: cx,
+      mcpServers: params.mcpServers,
+      systemPrompt: systemPromptOf(params),
     });
     log(`session ${sessionId} -> agent ${agentId} (cwd: ${params.cwd})`);
     this.announceCommands(sessionId, cx);
@@ -209,6 +230,8 @@ export class LettaAcpAgent {
       resumeId: params.sessionId,
       agentId: null,
       clientContext: cx,
+      mcpServers: params.mcpServers,
+      systemPrompt: systemPromptOf(params),
     });
     const history = await state.session.listMessages({
       order: "desc",
@@ -268,6 +291,8 @@ export class LettaAcpAgent {
     resumeId: string | null;
     agentId: string | null;
     clientContext: AgentContext;
+    mcpServers?: readonly McpServer[];
+    systemPrompt?: string | null;
   }): Promise<{ sessionId: string; state: AcpSessionState }> {
     const ref = { sessionId: options.resumeId ?? "" };
     const editorTools = createEditorTools(this.clientFsCaps, {
@@ -275,6 +300,11 @@ export class LettaAcpAgent {
       getClientContext: () =>
         this.sessions.get(ref.sessionId)?.clientContext ?? null,
     });
+    const mcp = await connectMcpServers(options.mcpServers, {
+      cwd: options.cwd,
+      log,
+    });
+    const tools = [...editorTools, ...mcp.tools];
     const sessionOptions = {
       cwd: options.cwd,
       model: this.config.model,
@@ -290,16 +320,22 @@ export class LettaAcpAgent {
           toolInput,
           context,
         ),
-      ...(editorTools.length > 0 ? { tools: editorTools } : {}),
+      ...(tools.length > 0 ? { tools } : {}),
     };
     const session = options.resumeId
       ? this.client.resumeSession(options.resumeId, sessionOptions)
       : this.client.createSession(options.agentId ?? "", sessionOptions);
     // Force runtime initialization so the conversation id exists.
-    await session.listMessages({ limit: 1 });
+    try {
+      await session.listMessages({ limit: 1 });
+    } catch (error) {
+      await mcp.close();
+      throw error;
+    }
     const sessionId = options.resumeId ?? session.conversationId;
     if (!sessionId) {
       session.close();
+      await mcp.close();
       throw new Error("Letta session did not report a conversation id");
     }
     ref.sessionId = sessionId;
@@ -318,6 +354,8 @@ export class LettaAcpAgent {
       promptActive: false,
       modeId: this.config.permissionMode,
       cwd: options.cwd,
+      mcp,
+      pendingSystemPrompt: options.systemPrompt?.trim() || null,
     };
     this.sessions.set(sessionId, state);
     return { sessionId, state };
@@ -351,7 +389,7 @@ export class LettaAcpAgent {
     try {
       const commandResponse = await this.maybeRunCommand(params, state, cx);
       if (commandResponse) return commandResponse;
-      await state.session.send(toLettaContent(params.prompt));
+      await state.session.send(withPendingSystemPrompt(state, params.prompt));
       // The Letta app-server transport completes a turn with a recoverable
       // "approval_conflict" result whenever a tool needs user approval. The
       // approval itself resolves concurrently: the server sends a
@@ -648,6 +686,7 @@ export class LettaAcpAgent {
       } catch {
         // best-effort cleanup on connection close
       }
+      void state.mcp.close();
     }
     this.sessions.clear();
   }
@@ -982,6 +1021,54 @@ async function raceDeadline<T>(
 function knownToolName(toolName: string): string | undefined {
   if (!toolName || toolName === "?") return undefined;
   return toolName;
+}
+
+/** Adapter version from package.json, or "0.0.0" if it cannot be read. */
+function packageVersion(): string {
+  try {
+    const require = createRequire(import.meta.url);
+    const pkg = require("../package.json") as { version?: unknown };
+    return typeof pkg.version === "string" ? pkg.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+/**
+ * Reads the non-standard `systemPrompt` a client may attach to `session/new`.
+ *
+ * ACP v1 has no such field, so it arrives as an extra member (harnesses like
+ * buzz-acp send one per session). Letta agents carry their own persona and the
+ * SDK exposes no per-session system prompt, so the text is delivered as a
+ * framed preamble on the session's first prompt instead — see
+ * {@link withPendingSystemPrompt}.
+ */
+function systemPromptOf(params: unknown): string | null {
+  if (typeof params !== "object" || params === null) return null;
+  const value = (params as { systemPrompt?: unknown }).systemPrompt;
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+/**
+ * Prompt content with the session's pending system prompt prepended once.
+ *
+ * Clients that send a system prompt expect it to govern the conversation, so
+ * it leads the first message the agent sees and is then cleared.
+ */
+function withPendingSystemPrompt(
+  state: AcpSessionState,
+  blocks: ContentBlock[],
+): MessageContentItem[] {
+  const content = toLettaContent(blocks);
+  const systemPrompt = state.pendingSystemPrompt;
+  if (!systemPrompt) return content;
+  state.pendingSystemPrompt = null;
+  log("delivering client system prompt with the first prompt of the session");
+  content.unshift({
+    type: "text",
+    text: `[System instructions from the client]\n${systemPrompt}`,
+  });
+  return content;
 }
 
 /** ACP prompt content blocks -> Letta multimodal message content. */
