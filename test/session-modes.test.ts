@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { modeAutoAllows } from "../src/session-modes.js";
+import {
+  modeAutoAllows,
+  permissionModeConfigOption,
+} from "../src/session-modes.js";
 
 const BOOKKEEPING_TOOLS = [
   "TaskCreate",
@@ -10,6 +13,34 @@ const BOOKKEEPING_TOOLS = [
 ];
 
 describe("session mode tool approvals", () => {
+  test("publishes permissions as a modern ACP mode config option", () => {
+    expect(permissionModeConfigOption("unrestricted")).toEqual({
+      id: "permissions",
+      name: "Permissions",
+      description: "Approval behavior for tool calls",
+      category: "mode",
+      type: "select",
+      currentValue: "unrestricted",
+      options: [
+        {
+          value: "standard",
+          name: "Ask before edits",
+          description: "Request permission for file edits and shell commands",
+        },
+        {
+          value: "acceptEdits",
+          name: "Accept edits",
+          description: "Auto-allow file edits; still ask for shell commands",
+        },
+        {
+          value: "unrestricted",
+          name: "Bypass permissions",
+          description: "Auto-allow all tool calls without asking",
+        },
+      ],
+    });
+  });
+
   test.each(BOOKKEEPING_TOOLS)(
     "auto-allows %s in ask-before-edits mode",
     (toolName) => {

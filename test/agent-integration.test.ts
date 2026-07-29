@@ -774,6 +774,22 @@ describe("Agent SDK app-server integration", () => {
 
       expect(session.configOptions).toEqual([
         {
+          id: "permissions",
+          name: "Permissions",
+          description: "Approval behavior for tool calls",
+          category: "mode",
+          type: "select",
+          currentValue: "standard",
+          options: [
+            expect.objectContaining({ value: "standard", name: "Ask before edits" }),
+            expect.objectContaining({ value: "acceptEdits", name: "Accept edits" }),
+            expect.objectContaining({
+              value: "unrestricted",
+              name: "Bypass permissions",
+            }),
+          ],
+        },
+        {
           id: "model",
           name: "Model",
           description: "Model used for this Letta session",
@@ -813,11 +829,51 @@ describe("Agent SDK app-server integration", () => {
       });
 
       expect(server.updatedModelPayloads).toEqual([{ model_id: "other-model" }]);
-      expect(result.configOptions[0]).toMatchObject({
+      expect(
+        result.configOptions.find((option) => option.id === "model"),
+      ).toMatchObject({
         id: "model",
         category: "model",
         currentValue: "other-model",
       });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("switches permission enforcement through session config options", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, permissionRequests } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      const result = await agent.setSessionConfigOption({
+        sessionId: session.sessionId,
+        configId: "permissions",
+        value: "unrestricted",
+      });
+      expect(
+        result.configOptions.find((option) => option.id === "permissions"),
+      ).toMatchObject({
+        category: "mode",
+        currentValue: "unrestricted",
+      });
+
+      await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "plain prompt" }],
+        },
+        context,
+      );
+      const approval = server.nextApprovalResponse();
+      server.requestPermissionAfterPrompt();
+
+      expect(await approval).toMatchObject({
+        decision: { behavior: "allow" },
+      });
+      expect(permissionRequests).toEqual([]);
     } finally {
       agent.shutdown();
     }
