@@ -132,6 +132,36 @@ export function isTerminalOutputTool(toolName: string): boolean {
   return toolName.toLowerCase() === "bash";
 }
 
+/**
+ * Portable result content for an ACP tool call.
+ *
+ * Presentation extensions are additive: a client-specific terminal reference
+ * may enhance the result, but ordinary ACP text remains available when the
+ * client ignores or cannot resolve that extension. Diff tools keep their
+ * structured diff as the success presentation and only add text on failure.
+ */
+export function toolResultContent(
+  toolCallId: string,
+  text: string,
+  options: {
+    includeTerminal?: boolean;
+    hasDiff?: boolean;
+    isError?: boolean;
+  } = {},
+): ToolCallContent[] {
+  const content: ToolCallContent[] = [];
+  if (options.includeTerminal) {
+    content.push({ type: "terminal", terminalId: toolCallId });
+  }
+  if (options.hasDiff !== true || options.isError === true) {
+    content.push({
+      type: "content",
+      content: { type: "text", text },
+    });
+  }
+  return content;
+}
+
 /** Parse tool output for ACP rawOutput while preserving non-JSON text. */
 export function parseToolOutput(content: string): unknown {
   try {
