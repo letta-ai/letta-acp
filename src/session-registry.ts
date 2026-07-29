@@ -36,7 +36,7 @@ export class SessionRegistry {
     this.records.set(sessionId, record);
     if (!this.directory) return;
 
-    await mkdir(this.directory, { recursive: true });
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const destination = this.pathFor(sessionId);
     const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(temporary, `${JSON.stringify(record)}\n`, { mode: 0o600 });

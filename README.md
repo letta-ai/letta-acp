@@ -195,7 +195,9 @@ adapter and delegate to the ACP client.
 | Model listing and switching (`configOptions` + `session/set_config_option`) | ✅ |
 | Slash commands (`available_commands_update`, ~30 commands + skills) | ✅ |
 | Client fs delegation (`fs/read_text_file`, `fs/write_text_file`) | ✅ via external tools |
-| Client terminal delegation (`terminal/*`) | ❌ (planned) |
+| MCP servers from `session/new` / `session/load` | ✅ stdio, via Agent SDK external tools |
+| Native Bash result rendering (`_meta.terminal_output`) | ✅ when supported by the client |
+| Client-side command execution (`terminal/*`) | ❌ (planned) |
 | Plan updates (`plan` from TodoWrite) | ❌ (planned) |
 
 ACP session ids are Letta conversation ids, so `session/load` works across
@@ -208,10 +210,11 @@ records with live conversation titles and timestamps from the configured Letta
 agent; unrelated conversations are not assigned an inferred project. Session
 modes are enforced in the adapter's permission
 callback — the harness always runs in `standard` mode so every approval routes
-through the adapter, which is what makes live mode switching possible;
-`acceptEdits` auto-allows file-edit tools, `unrestricted` auto-allows
-everything. `/model` (empty to list, or a handle to switch) is handled in the
-adapter without an LLM turn.
+through the adapter, which is what makes live mode switching possible. Session
+bookkeeping tools (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`, and
+`TodoWrite`) never require approval; `acceptEdits` additionally auto-allows
+file-edit tools, and `unrestricted` auto-allows everything. `/model` (empty to
+list, or a handle to switch) is handled in the adapter without an LLM turn.
 
 ### Slash commands
 
@@ -243,6 +246,10 @@ history ≈ `/resume`).
 - `session/prompt` sends the message and pumps `session.stream()`, translating
   SDK messages (`assistant`, `reasoning`, `tool_call`, `tool_result`) into
   `session/update` notifications.
+- When the client advertises `_meta.terminal_output`, Bash calls use ACP terminal
+  content plus `terminal_info`, `terminal_output`, and `terminal_exit` updates.
+  Zed controls whether terminal cards start expanded or collapsed; the adapter
+  sends the complete output and retains it in `rawOutput`.
 - Tool approvals: the SDK's `canUseTool` callback is forwarded as an ACP
   `session/request_permission` request. One Letta-specific wrinkle: the
   app-server transport ends the turn with a recoverable `approval_conflict`
@@ -272,3 +279,16 @@ open and the built-ins otherwise. Both go through the normal permission flow.
 Clients that don't advertise fs capabilities get no extra tools and everything
 runs Letta-side as before. Terminal delegation (`terminal/*`) is the remaining
 piece.
+
+## MCP servers
+
+ACP clients can pass MCP servers in `session/new` and `session/load`. The
+adapter forwards stdio server configurations to `@letta-ai/letta-agent-sdk`,
+which starts each server in the session cwd and exposes its tools through Letta
+Code's external-tool protocol. Tool names use
+`mcp__<server>__<tool>` namespacing, and the SDK closes each server with its
+session. A server that fails to start is logged and skipped without failing the
+whole ACP session.
+
+HTTP and SSE MCP transports are not yet supported, so the adapter does not
+advertise `mcpCapabilities` for them.

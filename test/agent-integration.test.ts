@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentContext } from "@agentclientprotocol/sdk";
 import type { LettaCodeSocketConstructor } from "@letta-ai/letta-agent-sdk";
 import { LettaAcpAgent } from "../src/agent.js";
+import { SessionRegistry } from "../src/session-registry.js";
 
 interface RuntimeScope {
   agent_id: string;
@@ -20,6 +24,8 @@ class FakeAppServer {
   readonly runtimeStartRequestIds: string[] = [];
   readonly createdAgentBodies: WireMessage[] = [];
   readonly approvalResponses: WireMessage[] = [];
+  readonly conversationRetrieveIds: string[] = [];
+  closedSockets = 0;
   readonly updatedModelPayloads: WireMessage[] = [];
   private nextConversation = 0;
   private activeControlSocket: ServerSocket | null = null;
@@ -53,6 +59,7 @@ class FakeAppServer {
       close(): void {
         if (this.readyState === 3) return;
         this.readyState = 3;
+        server.closedSockets += 1;
         this.emit("close", {});
       }
 
@@ -165,6 +172,23 @@ class FakeAppServer {
           request_id: requiredString(message.request_id, "enable_memfs.request_id"),
           success: true,
           memory_directory: "/tmp/letta-acp-memory",
+        });
+        return;
+      case "conversation_retrieve":
+        this.conversationRetrieveIds.push(
+          requiredString(message.conversation_id, "conversation_retrieve.conversation_id"),
+        );
+        socket.push({
+          type: "conversation_retrieve_response",
+          request_id: requiredString(
+            message.request_id,
+            "conversation_retrieve.request_id",
+          ),
+          success: true,
+          conversation: {
+            id: message.conversation_id,
+            agent_id: "agent-test",
+          },
         });
         return;
       case "conversation_messages_list":
@@ -536,6 +560,8 @@ function createAgent(
   server: FakeAppServer,
   overrides: {
     agentId?: string;
+    sessionRegistryDir?: string | null;
+    sessionRegistryScope?: string;
     outOfTurnPermissionTimeoutMs?: number;
     prematureResultGraceMs?: number;
   } = {},
@@ -615,6 +641,59 @@ describe("Agent SDK app-server integration", () => {
       });
     } finally {
       agent.shutdown();
+    }
+  });
+
+  test("closes a displaced session when the same conversation is loaded again", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context } = createContext();
+    const params = {
+      sessionId: "conv-existing",
+      cwd: "/tmp/letta-acp-test",
+      mcpServers: [],
+    };
+
+    try {
+      await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
+      await agent.loadSession(params, context);
+      const closedBeforeReload = server.closedSockets;
+
+      await agent.loadSession(params, context);
+
+      expect(server.closedSockets).toBeGreaterThan(closedBeforeReload);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("bounds session discovery lookups to one registry page", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "letta-acp-list-page-"));
+    const scope = "pagination-test";
+    const registry = new SessionRegistry(directory, scope);
+    const cwd = "/tmp/letta-acp-test";
+    for (let index = 0; index < 51; index += 1) {
+      await registry.record("agent-test", `conv-page-${String(index).padStart(2, "0")}`, cwd);
+    }
+
+    const server = new FakeAppServer();
+    const agent = createAgent(server, {
+      sessionRegistryDir: directory,
+      sessionRegistryScope: scope,
+    });
+    try {
+      const first = await agent.listSessions({ cwd });
+      expect(first.sessions).toHaveLength(50);
+      expect(first.nextCursor).toBeString();
+      expect(server.conversationRetrieveIds).toHaveLength(50);
+
+      const second = await agent.listSessions({ cwd, cursor: first.nextCursor });
+      expect(second.sessions).toHaveLength(1);
+      expect(second.nextCursor).toBeUndefined();
+      expect(server.conversationRetrieveIds).toHaveLength(51);
+    } finally {
+      agent.shutdown();
+      await rm(directory, { recursive: true, force: true });
     }
   });
 
@@ -755,7 +834,7 @@ describe("Agent SDK app-server integration", () => {
         {
           sessionUpdate: "tool_call_update",
           toolCallId: "call-fragmented",
-          title: "Bash: Show the working tree status",
+          title: "Show the working tree status",
           kind: "execute",
           status: "in_progress",
           rawInput: {
@@ -775,6 +854,89 @@ describe("Agent SDK app-server integration", () => {
               content: { type: "text", text: "nothing to commit" },
             },
           ],
+        },
+      ]);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("renders Bash output as a native terminal when the client supports it", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, updates } = createContext();
+
+    try {
+      await agent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: { _meta: { terminal_output: true } },
+      });
+      const session = await agent.newSession(
+        { cwd: "/tmp/letta-acp-test", mcpServers: [] },
+        context,
+      );
+      const result = await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "fragmented prompt" }],
+        },
+        context,
+      );
+
+      expect(result).toEqual({ stopReason: "end_turn" });
+      expect(
+        updates.filter((update) => update.toolCallId === "call-fragmented"),
+      ).toEqual([
+        {
+          sessionUpdate: "tool_call",
+          toolCallId: "call-fragmented",
+          title: "Bash",
+          kind: "execute",
+          status: "in_progress",
+          rawInput: { raw: '{"command":"git status"' },
+          locations: [],
+          content: [{ type: "terminal", terminalId: "call-fragmented" }],
+          _meta: {
+            terminal_info: {
+              terminal_id: "call-fragmented",
+              cwd: "/tmp/letta-acp-test",
+            },
+          },
+        },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-fragmented",
+          title: "Show the working tree status",
+          kind: "execute",
+          status: "in_progress",
+          rawInput: {
+            command: "git status",
+            description: "Show the working tree status",
+          },
+          locations: [],
+        },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-fragmented",
+          _meta: {
+            terminal_output: {
+              terminal_id: "call-fragmented",
+              data: "nothing to commit",
+            },
+          },
+        },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-fragmented",
+          status: "completed",
+          rawOutput: "nothing to commit",
+          _meta: {
+            terminal_exit: {
+              terminal_id: "call-fragmented",
+              exit_code: 0,
+              signal: null,
+            },
+          },
         },
       ]);
     } finally {
@@ -864,12 +1026,46 @@ describe("Agent SDK app-server integration", () => {
         expect.objectContaining({
           sessionId: session.sessionId,
           toolCall: expect.objectContaining({
-            title: "Bash: Show working directory after prompt",
+            title: "Show working directory after prompt",
           }),
         }),
       );
       // Out-of-turn requests carry a deadline the client can observe.
       expect(permissionSignals.at(-1)).toBeInstanceOf(AbortSignal);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("auto-allows task bookkeeping in ask-before-edits mode", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, permissionRequests } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "plain prompt" }],
+        },
+        context,
+      );
+      const approval = server.nextApprovalResponse();
+      server.requestPermissionAfterPrompt({
+        requestId: "task-update-request",
+        toolName: "TaskUpdate",
+        toolCallId: "call-task-update",
+        input: { taskId: "task_1", status: "completed" },
+      });
+
+      expect(await approval).toEqual(
+        expect.objectContaining({
+          request_id: "task-update-request",
+          decision: expect.objectContaining({ behavior: "allow" }),
+        }),
+      );
+      expect(permissionRequests).toEqual([]);
     } finally {
       agent.shutdown();
     }

@@ -26,9 +26,7 @@ describe("fragmented tool arguments", () => {
       command: "git status",
       description: "Show working tree status",
     });
-    expect(toolTitle("Bash", complete.input)).toBe(
-      "Bash: Show working tree status",
-    );
+    expect(toolTitle("Bash", complete.input)).toBe("Show working tree status");
     expect(complete.complete).toBe(true);
   });
 

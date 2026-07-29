@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionRegistry } from "../src/session-registry.js";
@@ -210,6 +210,106 @@ async function runAcpx(
   return { stdout, stderr, home, appServerUrl, cwd };
 }
 
+async function verifyMcpShutdownOnClientDisconnect(): Promise<void> {
+  const home = mkdtempSync(join(tmpdir(), "letta-acp-mcp-shutdown-"));
+  tempDirs.push(home);
+  const marker = join(home, "shutdown-marker");
+  const pidFile = join(home, "mcp-pid");
+  const appServerUrl = startFakeAppServer();
+  const agentPath = join(import.meta.dir, "..", "src", "index.ts");
+  const mcpPath = join(import.meta.dir, "fixtures", "stubborn-mcp-server.ts");
+  const child = Bun.spawn([process.execPath, agentPath], {
+    cwd: join(import.meta.dir, ".."),
+    env: {
+      ...process.env,
+      HOME: home,
+      LETTA_ACP_BACKEND: "remote",
+      LETTA_APP_SERVER_URL: appServerUrl,
+      LETTA_AGENT_ID: TEST_RUNTIME.agent_id,
+    },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const send = (message: WireMessage) => {
+    child.stdin.write(`${JSON.stringify(message)}\n`);
+    child.stdin.flush();
+  };
+  send({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: 1, clientCapabilities: {} },
+  });
+  send({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "session/new",
+    params: {
+      cwd: join(import.meta.dir, ".."),
+      mcpServers: [
+        {
+          name: "stubborn",
+          command: process.execPath,
+          args: [mcpPath],
+          env: [
+            { name: "MCP_SHUTDOWN_MARKER", value: marker },
+            { name: "MCP_PID_FILE", value: pidFile },
+          ],
+        },
+      ],
+    },
+  });
+
+  let buffer = "";
+  let sessionOpened = false;
+  const decoder = new TextDecoder();
+  try {
+    for await (const chunk of child.stdout) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let newline = buffer.indexOf("\n");
+      while (newline !== -1) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line) {
+          const message = JSON.parse(line) as WireMessage;
+          if (message.id === 2 && message.result) {
+            sessionOpened = true;
+            break;
+          }
+        }
+        newline = buffer.indexOf("\n");
+      }
+      if (sessionOpened) break;
+    }
+    expect(sessionOpened).toBe(true);
+    expect(existsSync(pidFile)).toBe(true);
+
+    child.stdin.end();
+    const exitCode = await Promise.race([
+      child.exited,
+      Bun.sleep(8_000).then(() => {
+        throw new Error("adapter did not exit after ACP stdin closed");
+      }),
+    ]);
+    expect(exitCode).toBe(0);
+    expect(existsSync(marker)).toBe(true);
+  } finally {
+    if (child.exitCode === null) child.kill();
+    if (existsSync(pidFile) && !existsSync(marker)) {
+      const pid = Number(readFileSync(pidFile, "utf8"));
+      if (Number.isInteger(pid)) {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+          // The fixture may already have exited while cleanup raced the test.
+        }
+      }
+    }
+  }
+}
+
 describe("acpx client compatibility", () => {
   test("completes a prompt through a real ACP client", async () => {
     const { stdout } = await runAcpx("quiet");
@@ -240,6 +340,10 @@ describe("acpx client compatibility", () => {
     expect(stdout).toContain("ACP client compatibility session");
     expect(stdout).toContain(cwd);
   }, 10_000);
+
+  test("waits for MCP subprocess cleanup after the client disconnects", async () => {
+    await verifyMcpShutdownOnClientDisconnect();
+  }, 12_000);
 
   test("emits a complete tool lifecycle as ACP notifications", async () => {
     const { stdout } = await runAcpx("json");

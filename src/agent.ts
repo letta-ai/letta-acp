@@ -8,6 +8,7 @@ import {
   type LoadSessionResponse,
   type ListSessionsRequest,
   type ListSessionsResponse,
+  type McpServer,
   methods,
   type NewSessionRequest,
   type NewSessionResponse,
@@ -28,6 +29,7 @@ import {
   LettaAgentClient,
   type LettaCodeSession,
   type LettaConversation,
+  type McpServerConfig,
   type MessageContentItem,
   type PermissionMode,
   type SDKMessage,
@@ -53,6 +55,7 @@ import {
 } from "./slash-commands.js";
 import {
   accumulateToolInput,
+  isTerminalOutputTool,
   parseToolOutput,
   type ToolCallInputState,
   toolDiffContent,
@@ -68,6 +71,8 @@ interface StreamedToolCall {
   input: ToolCallInputState;
   /** Whether the ACP card already contains a native diff. */
   hasDiff: boolean;
+  /** Whether terminal_info has created a native terminal for this call. */
+  hasTerminal: boolean;
 }
 
 interface AcpSessionState {
@@ -146,6 +151,7 @@ export class LettaAcpAgent {
   private readonly sessionRegistry: SessionRegistry;
   private readonly sessions = new Map<string, AcpSessionState>();
   private agentIdPromise: Promise<string> | null = null;
+  private supportsTerminalOutput = false;
   private clientFsCaps: EditorFsCapabilities = {
     readTextFile: false,
     writeTextFile: false,
@@ -167,6 +173,8 @@ export class LettaAcpAgent {
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     const fs = params.clientCapabilities?.fs;
+    this.supportsTerminalOutput =
+      params.clientCapabilities?._meta?.terminal_output === true;
     this.clientFsCaps = {
       readTextFile: fs?.readTextFile === true,
       writeTextFile: fs?.writeTextFile === true,
@@ -203,6 +211,7 @@ export class LettaAcpAgent {
       resumeId: null,
       agentId,
       clientContext: cx,
+      mcpServers: params.mcpServers,
     });
     await this.rememberSession(agentId, sessionId, params.cwd);
     log(`session ${sessionId} -> agent ${agentId} (cwd: ${params.cwd})`);
@@ -231,6 +240,7 @@ export class LettaAcpAgent {
       resumeId: params.sessionId,
       agentId: null,
       clientContext: cx,
+      mcpServers: params.mcpServers,
     });
     await this.rememberSession(state.session.agentId, sessionId, params.cwd);
     const history = await state.session.listMessages({
@@ -242,7 +252,10 @@ export class LettaAcpAgent {
         `session ${sessionId} has more than ${LOAD_HISTORY_LIMIT} messages; replaying the most recent ${LOAD_HISTORY_LIMIT}`,
       );
     }
-    const updates = historyToUpdates([...history.messages].reverse());
+    const updates = historyToUpdates([...history.messages].reverse(), {
+      terminalOutput: this.supportsTerminalOutput,
+      cwd: state.cwd,
+    });
     for (const update of updates) {
       await cx.notify(methods.client.session.update, { sessionId, update });
     }
@@ -266,42 +279,49 @@ export class LettaAcpAgent {
       start = previous + 1;
     }
 
-    const sessions: ListSessionsResponse["sessions"] = [];
-    let scanned = start;
-    while (scanned < records.length && sessions.length < SESSION_LIST_PAGE_SIZE) {
-      const record = records[scanned++]!;
-      let conversation: LettaConversation;
-      try {
-        conversation = await this.client.conversations.retrieve(record.sessionId);
-      } catch (error) {
-        // A deleted conversation is indistinguishable here from a transient
-        // management failure. Omit it for this response but retain the local
-        // record so an outage cannot erase discoverability permanently.
-        log(`cannot resolve listed session ${record.sessionId}: ${String(error)}`);
-        continue;
-      }
-      if (conversation.agent_id !== agentId || conversation.archived === true) {
-        await this.sessionRegistry.remove(record.sessionId);
-        continue;
-      }
-      const title = sessionTitle(conversation);
-      const updatedAt =
-        conversation.last_message_at ??
-        conversation.updated_at ??
-        conversation.created_at ??
-        record.recordedAt;
-      sessions.push({
-        sessionId: record.sessionId,
-        cwd: record.cwd,
-        ...(title ? { title } : {}),
-        ...(updatedAt ? { updatedAt } : {}),
-      });
-    }
+    // Bound each page by registry records rather than successful lookups. Stale
+    // or temporarily unavailable conversations must not turn one list request
+    // into an unbounded sequence of management calls.
+    const page = records.slice(start, start + SESSION_LIST_PAGE_SIZE);
+    const resolved = await Promise.all(
+      page.map(async (record) => {
+        let conversation: LettaConversation;
+        try {
+          conversation = await this.client.conversations.retrieve(record.sessionId);
+        } catch (error) {
+          // A deleted conversation is indistinguishable here from a transient
+          // management failure. Omit it for this response but retain the local
+          // record so an outage cannot erase discoverability permanently.
+          log(`cannot resolve listed session ${record.sessionId}: ${String(error)}`);
+          return null;
+        }
+        if (conversation.agent_id !== agentId || conversation.archived === true) {
+          await this.sessionRegistry.remove(record.sessionId);
+          return null;
+        }
+        const title = sessionTitle(conversation);
+        const updatedAt =
+          conversation.last_message_at ??
+          conversation.updated_at ??
+          conversation.created_at ??
+          record.recordedAt;
+        return {
+          sessionId: record.sessionId,
+          cwd: record.cwd,
+          ...(title ? { title } : {}),
+          ...(updatedAt ? { updatedAt } : {}),
+        };
+      }),
+    );
+    const sessions = resolved.filter(
+      (session): session is NonNullable<typeof session> => session !== null,
+    );
+    const last = page.at(-1);
 
     return {
       sessions,
-      ...(scanned < records.length && sessions.length > 0
-        ? { nextCursor: records[scanned - 1]!.sessionId }
+      ...(last && start + page.length < records.length
+        ? { nextCursor: last.sessionId }
         : {}),
     };
   }
@@ -425,6 +445,7 @@ export class LettaAcpAgent {
     resumeId: string | null;
     agentId: string | null;
     clientContext: AgentContext;
+    mcpServers?: readonly McpServer[];
   }): Promise<{ sessionId: string; state: AcpSessionState }> {
     const ref = { sessionId: options.resumeId ?? "" };
     const editorTools = createEditorTools(this.clientFsCaps, {
@@ -432,6 +453,7 @@ export class LettaAcpAgent {
       getClientContext: () =>
         this.sessions.get(ref.sessionId)?.clientContext ?? null,
     });
+    const mcpServers = toSdkMcpServers(options.mcpServers);
     const sessionOptions = {
       cwd: options.cwd,
       model: this.config.model,
@@ -448,6 +470,7 @@ export class LettaAcpAgent {
           context,
         ),
       ...(editorTools.length > 0 ? { tools: editorTools } : {}),
+      ...(mcpServers.length > 0 ? { mcpServers } : {}),
     };
     const session = options.resumeId
       ? this.client.resumeSession(options.resumeId, sessionOptions)
@@ -477,6 +500,13 @@ export class LettaAcpAgent {
       cwd: options.cwd,
       currentModel: bootstrap.model ?? this.config.model,
     };
+    // A client may load the same conversation again while its prior ACP
+    // session is still open. Close the displaced SDK session before replacing
+    // it so its sockets and per-session MCP subprocesses are not orphaned.
+    const displaced = this.sessions.get(sessionId);
+    if (displaced && displaced.session !== session) {
+      displaced.session.close();
+    }
     this.sessions.set(sessionId, state);
     return { sessionId, state };
   }
@@ -856,7 +886,15 @@ export class LettaAcpAgent {
         );
         const diffContent = toolDiffContent(toolName, input.input);
         const hasDiff = existing?.hasDiff === true || diffContent.length > 0;
-        state.toolCalls.set(message.toolCallId, { toolName, input, hasDiff });
+        const nativeTerminal =
+          this.supportsTerminalOutput && isTerminalOutputTool(toolName);
+        const addTerminal = nativeTerminal && existing?.hasTerminal !== true;
+        state.toolCalls.set(message.toolCallId, {
+          toolName,
+          input,
+          hasDiff,
+          hasTerminal: existing?.hasTerminal === true || addTerminal,
+        });
         state.lastToolCall = { id: message.toolCallId, name: toolName };
         // Partial JSON has no usable title or locations, so hold the card
         // steady until the arguments parse rather than flickering through
@@ -877,7 +915,19 @@ export class LettaAcpAgent {
             status: "in_progress",
             rawInput: input.input,
             locations: toolLocations(input.input),
-            ...(diffContent.length > 0 ? { content: diffContent } : {}),
+            ...(diffContent.length > 0
+              ? { content: diffContent }
+              : addTerminal
+                ? {
+                    content: [{ type: "terminal" as const, terminalId: message.toolCallId }],
+                    _meta: {
+                      terminal_info: {
+                        terminal_id: message.toolCallId,
+                        cwd: state.cwd,
+                      },
+                    },
+                  }
+                : {}),
           },
         });
         return true;
@@ -889,6 +939,24 @@ export class LettaAcpAgent {
         const locations = toolCall
           ? toolLocations(toolCall.input.input, toolOutputLine(rawOutput))
           : [];
+        const nativeTerminal = toolCall?.hasTerminal === true;
+        if (nativeTerminal) {
+          // Zed creates the display-only terminal from terminal_info on the
+          // initial call, then consumes output and exit as ordered updates.
+          await cx.notify(methods.client.session.update, {
+            sessionId,
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId: message.toolCallId,
+              _meta: {
+                terminal_output: {
+                  terminal_id: message.toolCallId,
+                  data: message.content,
+                },
+              },
+            },
+          });
+        }
         await cx.notify(methods.client.session.update, {
           sessionId,
           update: {
@@ -897,16 +965,29 @@ export class LettaAcpAgent {
             status: message.isError ? "failed" : "completed",
             rawOutput,
             ...(locations.length > 0 ? { locations } : {}),
-            ...(toolCall?.hasDiff !== true || message.isError
+            ...(nativeTerminal
               ? {
-                  content: [
-                    {
-                      type: "content" as const,
-                      content: { type: "text" as const, text: message.content },
+                  _meta: {
+                    terminal_exit: {
+                      terminal_id: message.toolCallId,
+                      exit_code: message.isError ? 1 : 0,
+                      signal: null,
                     },
-                  ],
+                  },
                 }
-              : {}),
+              : toolCall?.hasDiff !== true || message.isError
+                ? {
+                    content: [
+                      {
+                        type: "content" as const,
+                        content: {
+                          type: "text" as const,
+                          text: message.content,
+                        },
+                      },
+                    ],
+                  }
+                : {}),
           },
         });
         return true;
@@ -1147,6 +1228,53 @@ async function raceDeadline<T>(
 function knownToolName(toolName: string): string | undefined {
   if (!toolName || toolName === "?") return undefined;
   return toolName;
+}
+
+/**
+ * Convert ACP's MCP server union to the stdio configuration owned by the Agent
+ * SDK. HTTP and SSE require capabilities this adapter does not advertise yet.
+ */
+function toSdkMcpServers(
+  servers: readonly McpServer[] | undefined,
+): McpServerConfig[] {
+  const configs: McpServerConfig[] = [];
+  for (const server of servers ?? []) {
+    const type = (server as { type?: string }).type;
+    if (type !== undefined && type !== "stdio") {
+      log(
+        `MCP server "${server.name}" skipped: only stdio transport is supported`,
+      );
+      continue;
+    }
+
+    const stdio = server as {
+      name: string;
+      command?: unknown;
+      args?: unknown;
+      env?: unknown;
+    };
+    if (typeof stdio.command !== "string" || stdio.command.length === 0) {
+      log(`MCP server "${server.name}" skipped: missing stdio command`);
+      continue;
+    }
+    const args = Array.isArray(stdio.args)
+      ? stdio.args.filter((arg): arg is string => typeof arg === "string")
+      : [];
+    const env = Array.isArray(stdio.env)
+      ? stdio.env.flatMap((entry) => {
+          if (!entry || typeof entry !== "object") return [];
+          const { name, value } = entry as {
+            name?: unknown;
+            value?: unknown;
+          };
+          return typeof name === "string" && typeof value === "string"
+            ? [{ name, value }]
+            : [];
+        })
+      : [];
+    configs.push({ name: stdio.name, command: stdio.command, args, env });
+  }
+  return configs;
 }
 
 /** ACP prompt content blocks -> Letta multimodal message content. */
