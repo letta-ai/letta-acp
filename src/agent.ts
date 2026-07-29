@@ -49,7 +49,6 @@ import {
 } from "./slash-commands.js";
 import {
   accumulateToolInput,
-  boundedToolOutput,
   isTerminalOutputTool,
   parseToolOutput,
   type ToolCallInputState,
@@ -847,7 +846,7 @@ export class LettaAcpAgent {
               _meta: {
                 terminal_output: {
                   terminal_id: message.toolCallId,
-                  data: boundedToolOutput(message.content),
+                  data: message.content,
                 },
               },
             },
@@ -878,10 +877,7 @@ export class LettaAcpAgent {
                         type: "content" as const,
                         content: {
                           type: "text" as const,
-                          text:
-                            toolCall && isTerminalOutputTool(toolCall.toolName)
-                              ? boundedToolOutput(message.content)
-                              : message.content,
+                          text: message.content,
                         },
                       },
                     ],

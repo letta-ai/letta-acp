@@ -128,57 +128,8 @@ export function toolDiffContent(
   return [];
 }
 
-const TOOL_OUTPUT_DISPLAY_BYTES = 16 * 1024;
-const TOOL_OUTPUT_DISPLAY_LINES = 24;
-
 export function isTerminalOutputTool(toolName: string): boolean {
   return toolName.toLowerCase() === "bash";
-}
-
-/**
- * Keep tool cards compact without changing the full rawOutput payload. Preserve
- * both ends because failures and summaries commonly land at the end of output.
- */
-export function boundedToolOutput(content: string): string {
-  const trailingNewline = content.endsWith("\n");
-  const lines = content.split("\n");
-  if (trailingNewline) lines.pop();
-  let display = content;
-  if (lines.length > TOOL_OUTPUT_DISPLAY_LINES) {
-    const side = TOOL_OUTPUT_DISPLAY_LINES / 2;
-    const omitted = lines.length - TOOL_OUTPUT_DISPLAY_LINES;
-    display = `${[
-      ...lines.slice(0, side),
-      `… ${omitted} lines omitted from display …`,
-      ...lines.slice(-side),
-    ].join("\n")}${trailingNewline ? "\n" : ""}`;
-  }
-
-  const encoded = Buffer.from(display);
-  if (encoded.byteLength <= TOOL_OUTPUT_DISPLAY_BYTES) return display;
-
-  const marker = "\n\n… output truncated for display …\n\n";
-  const markerBytes = Buffer.byteLength(marker);
-  const remaining = TOOL_OUTPUT_DISPLAY_BYTES - markerBytes;
-  const headBytes = Math.floor(remaining / 2);
-  const tailBytes = remaining - headBytes;
-  return `${decodeUtf8Boundary(encoded.subarray(0, headBytes), "head")}${marker}${decodeUtf8Boundary(
-    encoded.subarray(encoded.byteLength - tailBytes),
-    "tail",
-  )}`;
-}
-
-function decodeUtf8Boundary(bytes: Buffer, side: "head" | "tail"): string {
-  for (let offset = 0; offset < Math.min(4, bytes.byteLength); offset += 1) {
-    const candidate =
-      side === "head" ? bytes.subarray(0, bytes.byteLength - offset) : bytes.subarray(offset);
-    try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(candidate);
-    } catch {
-      // The byte slice may start or end inside a multibyte codepoint.
-    }
-  }
-  return "";
 }
 
 /** Parse tool output for ACP rawOutput while preserving non-JSON text. */
@@ -196,10 +147,11 @@ export function toolTitle(
   toolInput: Record<string, unknown>,
 ): string {
   if (isTerminalOutputTool(toolName)) {
-    const command = firstString(toolInput, ["command"]);
-    // Keep the executable command intact: shortening or replacing it with a
-    // friendly description can hide the operation a user is approving.
-    return command ?? toolName;
+    return (
+      firstString(toolInput, ["description"]) ??
+      firstString(toolInput, ["command"]) ??
+      toolName
+    );
   }
   const detail =
     firstString(toolInput, [

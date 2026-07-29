@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   accumulateToolInput,
-  boundedToolOutput,
   parseToolOutput,
   toolDiffContent,
   toolLocations,
@@ -27,7 +26,7 @@ describe("fragmented tool arguments", () => {
       command: "git status",
       description: "Show working tree status",
     });
-    expect(toolTitle("Bash", complete.input)).toBe("git status");
+    expect(toolTitle("Bash", complete.input)).toBe("Show working tree status");
     expect(complete.complete).toBe(true);
   });
 
@@ -85,38 +84,6 @@ describe("fragmented tool arguments", () => {
     );
     expect(complete.input).toEqual(input);
     expect(toolLocations(complete.input)).toEqual([{ path: "/tmp/example.ts" }]);
-  });
-});
-
-describe("tool output fallback", () => {
-  test("preserves short output", () => {
-    expect(boundedToolOutput("hello")).toBe("hello");
-  });
-
-  test("keeps only the first and last 12 lines", () => {
-    const output = `${Array.from({ length: 200 }, (_, index) => index + 1).join("\n")}\n`;
-    const bounded = boundedToolOutput(output);
-    const lines = bounded.trimEnd().split("\n");
-
-    expect(lines).toHaveLength(25);
-    expect(lines.slice(0, 12)).toEqual(
-      Array.from({ length: 12 }, (_, index) => String(index + 1)),
-    );
-    expect(lines[12]).toBe("… 176 lines omitted from display …");
-    expect(lines.slice(-12)).toEqual(
-      Array.from({ length: 12 }, (_, index) => String(index + 189)),
-    );
-  });
-
-  test("bounds a long line while preserving its head, tail, and UTF-8", () => {
-    const output = `${"a".repeat(12_000)}🙂${"z".repeat(12_000)}`;
-    const bounded = boundedToolOutput(output);
-
-    expect(Buffer.byteLength(bounded)).toBeLessThanOrEqual(16 * 1024);
-    expect(bounded.startsWith("aaaa")).toBe(true);
-    expect(bounded.endsWith("zzzz")).toBe(true);
-    expect(bounded).toContain("output truncated for display");
-    expect(bounded).not.toContain("�");
   });
 });
 

@@ -1,6 +1,5 @@
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import {
-  boundedToolOutput,
   isTerminalOutputTool,
   parseToolOutput,
   toolDiffContent,
@@ -130,10 +129,7 @@ export function historyToUpdates(
             sessionUpdate: "tool_call_update",
             toolCallId,
             _meta: {
-              terminal_output: {
-                terminal_id: toolCallId,
-                data: boundedToolOutput(text),
-              },
+              terminal_output: { terminal_id: toolCallId, data: text },
             },
           });
         }
@@ -158,13 +154,7 @@ export function historyToUpdates(
                   content: [
                     {
                       type: "content",
-                      content: {
-                        type: "text",
-                        text:
-                          toolName && isTerminalOutputTool(toolName)
-                            ? boundedToolOutput(text)
-                            : text,
-                      },
+                      content: { type: "text", text },
                     },
                   ],
                 }

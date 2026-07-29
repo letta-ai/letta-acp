@@ -296,14 +296,6 @@ class FakeAppServer {
     }
 
     const promptText = JSON.stringify(payload.messages);
-    if (promptText.includes("long fragmented prompt")) {
-      this.streamFragmentedToolCall(
-        socket,
-        runtime,
-        `${Array.from({ length: 200 }, (_, index) => index + 1).join("\n")}\n`,
-      );
-      return;
-    }
     if (promptText.includes("fragmented prompt")) {
       this.streamFragmentedToolCall(socket, runtime);
       return;
@@ -453,7 +445,6 @@ class FakeAppServer {
   private streamFragmentedToolCall(
     socket: ServerSocket,
     runtime: RuntimeScope,
-    output = "nothing to commit",
   ): void {
     const fragments = [
       { name: "Bash", arguments: '{"command":"git status"' },
@@ -471,7 +462,7 @@ class FakeAppServer {
       message_type: "tool_return_message",
       run_id: "run-fragmented",
       tool_call_id: "call-fragmented",
-      tool_return: output,
+      tool_return: "nothing to commit",
       status: "success",
     });
     this.pushDelta(socket, runtime, {
@@ -764,7 +755,7 @@ describe("Agent SDK app-server integration", () => {
         {
           sessionUpdate: "tool_call_update",
           toolCallId: "call-fragmented",
-          title: "git status",
+          title: "Show the working tree status",
           kind: "execute",
           status: "in_progress",
           rawInput: {
@@ -836,7 +827,7 @@ describe("Agent SDK app-server integration", () => {
         {
           sessionUpdate: "tool_call_update",
           toolCallId: "call-fragmented",
-          title: "git status",
+          title: "Show the working tree status",
           kind: "execute",
           status: "in_progress",
           rawInput: {
@@ -869,49 +860,6 @@ describe("Agent SDK app-server integration", () => {
           },
         },
       ]);
-    } finally {
-      agent.shutdown();
-    }
-  });
-
-  test("caps native terminal display without truncating rawOutput", async () => {
-    const server = new FakeAppServer();
-    const agent = createAgent(server);
-    const { context, updates } = createContext();
-
-    try {
-      await agent.initialize({
-        protocolVersion: 1,
-        clientCapabilities: { _meta: { terminal_output: true } },
-      });
-      const session = await agent.newSession(
-        { cwd: "/tmp/letta-acp-test", mcpServers: [] },
-        context,
-      );
-      await agent.prompt(
-        {
-          sessionId: session.sessionId,
-          prompt: [{ type: "text", text: "long fragmented prompt" }],
-        },
-        context,
-      );
-
-      const terminalOutput = updates.find(
-        (update) =>
-          update.toolCallId === "call-fragmented" &&
-          (update._meta as WireMessage | undefined)?.terminal_output,
-      );
-      const displayed = (
-        (terminalOutput?._meta as WireMessage).terminal_output as WireMessage
-      ).data as string;
-      expect(displayed.trimEnd().split("\n")).toHaveLength(25);
-      expect(displayed).toContain("… 176 lines omitted from display …");
-
-      const completed = updates.find(
-        (update) =>
-          update.toolCallId === "call-fragmented" && update.status === "completed",
-      );
-      expect((completed?.rawOutput as string).trimEnd().split("\n")).toHaveLength(200);
     } finally {
       agent.shutdown();
     }
@@ -999,7 +947,7 @@ describe("Agent SDK app-server integration", () => {
         expect.objectContaining({
           sessionId: session.sessionId,
           toolCall: expect.objectContaining({
-            title: "pwd",
+            title: "Show working directory after prompt",
           }),
         }),
       );
