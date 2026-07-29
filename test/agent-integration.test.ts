@@ -20,6 +20,7 @@ class FakeAppServer {
   readonly runtimeStartRequestIds: string[] = [];
   readonly createdAgentBodies: WireMessage[] = [];
   readonly approvalResponses: WireMessage[] = [];
+  closedSockets = 0;
   readonly updatedModelPayloads: WireMessage[] = [];
   private nextConversation = 0;
   private activeControlSocket: ServerSocket | null = null;
@@ -53,6 +54,7 @@ class FakeAppServer {
       close(): void {
         if (this.readyState === 3) return;
         this.readyState = 3;
+        server.closedSockets += 1;
         this.emit("close", {});
       }
 
@@ -165,6 +167,20 @@ class FakeAppServer {
           request_id: requiredString(message.request_id, "enable_memfs.request_id"),
           success: true,
           memory_directory: "/tmp/letta-acp-memory",
+        });
+        return;
+      case "conversation_retrieve":
+        socket.push({
+          type: "conversation_retrieve_response",
+          request_id: requiredString(
+            message.request_id,
+            "conversation_retrieve.request_id",
+          ),
+          success: true,
+          conversation: {
+            id: message.conversation_id,
+            agent_id: "agent-test",
+          },
         });
         return;
       case "conversation_messages_list":
@@ -613,6 +629,29 @@ describe("Agent SDK app-server integration", () => {
           expect.objectContaining({ label: "human" }),
         ]),
       });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("closes a displaced session when the same conversation is loaded again", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context } = createContext();
+    const params = {
+      sessionId: "conv-existing",
+      cwd: "/tmp/letta-acp-test",
+      mcpServers: [],
+    };
+
+    try {
+      await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
+      await agent.loadSession(params, context);
+      const closedBeforeReload = server.closedSockets;
+
+      await agent.loadSession(params, context);
+
+      expect(server.closedSockets).toBeGreaterThan(closedBeforeReload);
     } finally {
       agent.shutdown();
     }

@@ -58,5 +58,6 @@ const connection = await acp
   .connect(stream);
 
 await connection.closed;
+// Session close begins MCP subprocess shutdown. Do not force-exit here: the
+// child process handles keep Node/Bun alive until that cleanup completes.
 agent.shutdown();
-process.exit(0);

@@ -409,6 +409,13 @@ export class LettaAcpAgent {
       cwd: options.cwd,
       currentModel: bootstrap.model ?? this.config.model,
     };
+    // A client may load the same conversation again while its prior ACP
+    // session is still open. Close the displaced SDK session before replacing
+    // it so its sockets and per-session MCP subprocesses are not orphaned.
+    const displaced = this.sessions.get(sessionId);
+    if (displaced && displaced.session !== session) {
+      displaced.session.close();
+    }
     this.sessions.set(sessionId, state);
     return { sessionId, state };
   }
