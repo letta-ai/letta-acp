@@ -64,6 +64,7 @@ import {
   toolKind,
   toolLocations,
   toolOutputLine,
+  toolResultContent,
   toolTitle,
 } from "./tool-info.js";
 
@@ -968,6 +969,15 @@ export class LettaAcpAgent {
             },
           });
         }
+        const resultContent = toolResultContent(
+          message.toolCallId,
+          message.content,
+          {
+            includeTerminal: nativeTerminal,
+            hasDiff: toolCall?.hasDiff,
+            isError: message.isError,
+          },
+        );
         await cx.notify(methods.client.session.update, {
           sessionId,
           update: {
@@ -976,6 +986,7 @@ export class LettaAcpAgent {
             status: message.isError ? "failed" : "completed",
             rawOutput,
             ...(locations.length > 0 ? { locations } : {}),
+            ...(resultContent.length > 0 ? { content: resultContent } : {}),
             ...(nativeTerminal
               ? {
                   _meta: {
@@ -986,19 +997,7 @@ export class LettaAcpAgent {
                     },
                   },
                 }
-              : toolCall?.hasDiff !== true || message.isError
-                ? {
-                    content: [
-                      {
-                        type: "content" as const,
-                        content: {
-                          type: "text" as const,
-                          text: message.content,
-                        },
-                      },
-                    ],
-                  }
-                : {}),
+              : {}),
           },
         });
         return true;

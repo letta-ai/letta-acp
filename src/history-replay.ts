@@ -6,6 +6,7 @@ import {
   toolKind,
   toolLocations,
   toolOutputLine,
+  toolResultContent,
   toolTitle,
 } from "./tool-info.js";
 
@@ -124,6 +125,14 @@ export function historyToUpdates(
         const locations = input
           ? toolLocations(input, toolOutputLine(rawOutput))
           : [];
+        const resultContent =
+          text !== undefined
+            ? toolResultContent(toolCallId, text, {
+                includeTerminal: nativeTerminal,
+                hasDiff,
+                isError: failed,
+              })
+            : [];
         if (nativeTerminal && text !== undefined) {
           updates.push({
             sessionUpdate: "tool_call_update",
@@ -139,6 +148,7 @@ export function historyToUpdates(
           status: failed ? "failed" : "completed",
           ...(rawOutput !== undefined ? { rawOutput } : {}),
           ...(locations.length > 0 ? { locations } : {}),
+          ...(resultContent.length > 0 ? { content: resultContent } : {}),
           ...(nativeTerminal
             ? {
                 _meta: {
@@ -149,16 +159,7 @@ export function historyToUpdates(
                   },
                 },
               }
-            : text && (!hasDiff || failed)
-              ? {
-                  content: [
-                    {
-                      type: "content",
-                      content: { type: "text", text },
-                    },
-                  ],
-                }
-              : {}),
+            : {}),
         });
         break;
       }

@@ -5,6 +5,7 @@ import {
   toolDiffContent,
   toolLocations,
   toolOutputLine,
+  toolResultContent,
   toolTitle,
 } from "../src/tool-info.js";
 
@@ -26,6 +27,7 @@ describe("fragmented tool arguments", () => {
       command: "git status",
       description: "Show working tree status",
     });
+
     expect(toolTitle("Bash", complete.input)).toBe("Show working tree status");
     expect(complete.complete).toBe(true);
   });
@@ -173,6 +175,39 @@ describe("edit tool presentation", () => {
     ]);
     expect(toolLocations({ file_path: "C:\\repo\\example.ts" }, 12)).toEqual([
       { path: "C:\\repo\\example.ts", line: 12 },
+    ]);
+  });
+});
+
+describe("portable tool results", () => {
+  test("keeps text when a presentation extension is present", () => {
+    expect(
+      toolResultContent("call-bash", "command output", {
+        includeTerminal: true,
+      }),
+    ).toEqual([
+      { type: "terminal", terminalId: "call-bash" },
+      {
+        type: "content",
+        content: { type: "text", text: "command output" },
+      },
+    ]);
+  });
+
+  test("does not duplicate successful diff presentation", () => {
+    expect(
+      toolResultContent("call-edit", "edit applied", { hasDiff: true }),
+    ).toEqual([]);
+    expect(
+      toolResultContent("call-edit", "edit failed", {
+        hasDiff: true,
+        isError: true,
+      }),
+    ).toEqual([
+      {
+        type: "content",
+        content: { type: "text", text: "edit failed" },
+      },
     ]);
   });
 });
