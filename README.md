@@ -194,6 +194,7 @@ adapter and delegate to the ACP client.
 | Model listing and switching (`configOptions` + `session/set_config_option`) | ✅ |
 | Slash commands (`available_commands_update`, ~30 commands + skills) | ✅ |
 | Client fs delegation (`fs/read_text_file`, `fs/write_text_file`) | ✅ via external tools |
+| MCP servers from `session/new` / `session/load` | ✅ stdio, via Agent SDK external tools |
 | Native Bash result rendering (`_meta.terminal_output`) | ✅ when supported by the client |
 | Client-side command execution (`terminal/*`) | ❌ (planned) |
 | Plan updates (`plan` from TodoWrite) | ❌ (planned) |
@@ -271,3 +272,16 @@ open and the built-ins otherwise. Both go through the normal permission flow.
 Clients that don't advertise fs capabilities get no extra tools and everything
 runs Letta-side as before. Terminal delegation (`terminal/*`) is the remaining
 piece.
+
+## MCP servers
+
+ACP clients can pass MCP servers in `session/new` and `session/load`. The
+adapter forwards stdio server configurations to `@letta-ai/letta-agent-sdk`,
+which starts each server in the session cwd and exposes its tools through Letta
+Code's external-tool protocol. Tool names use
+`mcp__<server>__<tool>` namespacing, and the SDK closes each server with its
+session. A server that fails to start is logged and skipped without failing the
+whole ACP session.
+
+HTTP and SSE MCP transports are not yet supported, so the adapter does not
+advertise `mcpCapabilities` for them.
