@@ -45,6 +45,7 @@ import { historyToUpdates } from "./history-replay.js";
 import { withAcpRequestTimeout } from "./request-timeout.js";
 import { SessionRegistry } from "./session-registry.js";
 import {
+  editorReadAutoAllows,
   isSessionModeId,
   modeAutoAllows,
   PERMISSION_MODE_CONFIG_ID,
@@ -1081,7 +1082,13 @@ export class LettaAcpAgent {
     toolInput: Record<string, unknown>,
     context: CanUseToolContext | undefined,
   ): Promise<CanUseToolResponse> {
-    if (modeAutoAllows(state.modeId, toolName)) {
+    const workspaceEditorRead = await editorReadAutoAllows(
+      state.modeId,
+      toolName,
+      toolInput,
+      state.cwd,
+    );
+    if (modeAutoAllows(state.modeId, toolName) || workspaceEditorRead) {
       log(`auto-allowing ${toolName} (mode ${state.modeId})`);
       return { behavior: "allow", updatedInput: toolInput };
     }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentContext } from "@agentclientprotocol/sdk";
@@ -598,10 +598,15 @@ function createAgent(
 }
 
 function createContext(
-  options: { answerPermissions?: boolean; permissionDelayMs?: number } = {},
+  options: {
+    answerPermissions?: boolean;
+    permissionDelayMs?: number;
+    permissionOptionId?: "allow_once" | "allow_always" | "reject_once";
+  } = {},
 ) {
   const answerPermissions = options.answerPermissions ?? true;
   const permissionDelayMs = options.permissionDelayMs ?? 0;
+  const permissionOptionId = options.permissionOptionId ?? "allow_once";
   const updates: WireMessage[] = [];
   const permissionRequests: WireMessage[] = [];
   const permissionSignals: Array<AbortSignal | undefined> = [];
@@ -621,19 +626,20 @@ function createContext(
         await Bun.sleep(permissionDelayMs);
       }
       return {
-        outcome: { outcome: "selected" as const, optionId: "allow_once" },
+        outcome: { outcome: "selected" as const, optionId: permissionOptionId },
       };
     },
   } as unknown as AgentContext;
   return { context, updates, permissionRequests, permissionSignals };
 }
 
-async function openSession(agent: LettaAcpAgent, context: AgentContext) {
+async function openSession(
+  agent: LettaAcpAgent,
+  context: AgentContext,
+  cwd = "/tmp/letta-acp-test",
+) {
   await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
-  return agent.newSession(
-    { cwd: "/tmp/letta-acp-test", mcpServers: [] },
-    context,
-  );
+  return agent.newSession({ cwd, mcpServers: [] }, context);
 }
 
 describe("Agent SDK app-server integration", () => {
@@ -1176,6 +1182,154 @@ describe("Agent SDK app-server integration", () => {
       expect(permissionRequests).toEqual([]);
     } finally {
       agent.shutdown();
+    }
+  });
+
+  test("aligns editor-tool approvals with session modes and cwd", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, permissionRequests } = createContext();
+    const root = await mkdtemp(join(tmpdir(), "letta-acp-editor-permissions-"));
+    const workspace = join(root, "repo");
+    const inside = join(workspace, "src", "inside.ts");
+    const outside = join(root, "outside.ts");
+    await mkdir(join(workspace, "src"), { recursive: true });
+    await writeFile(inside, "inside\n");
+    await writeFile(outside, "outside\n");
+
+    try {
+      const session = await openSession(agent, context, workspace);
+      await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "plain prompt" }],
+        },
+        context,
+      );
+
+      const insideApproval = server.nextApprovalResponse();
+      server.requestPermissionAfterPrompt({
+        requestId: "read-inside",
+        toolName: "read_editor_buffer",
+        toolCallId: "call-read-inside",
+        input: { path: inside },
+      });
+      expect(await insideApproval).toMatchObject({
+        request_id: "read-inside",
+        decision: { behavior: "allow" },
+      });
+      expect(permissionRequests).toEqual([]);
+
+      const outsideApproval = server.nextApprovalResponse();
+      server.requestPermissionAfterPrompt({
+        requestId: "read-outside",
+        toolName: "read_editor_buffer",
+        toolCallId: "call-read-outside",
+        input: { path: outside },
+      });
+      await outsideApproval;
+      expect(permissionRequests.at(-1)).toMatchObject({
+        toolCall: {
+          toolCallId: "call-read-outside",
+          kind: "read",
+          rawInput: { path: outside },
+        },
+      });
+
+      const standardWrite = server.nextApprovalResponse();
+      server.requestPermissionAfterPrompt({
+        requestId: "write-standard",
+        toolName: "write_via_editor",
+        toolCallId: "call-write-standard",
+        input: { path: inside, content: "changed\n" },
+      });
+      await standardWrite;
+      expect(permissionRequests.at(-1)).toMatchObject({
+        toolCall: {
+          toolCallId: "call-write-standard",
+          kind: "edit",
+        },
+      });
+
+      await agent.setSessionConfigOption({
+        sessionId: session.sessionId,
+        configId: "permissions",
+        value: "acceptEdits",
+      });
+      const requestCount = permissionRequests.length;
+      const acceptedWrite = server.nextApprovalResponse();
+      server.requestPermissionAfterPrompt({
+        requestId: "write-accepted",
+        toolName: "write_via_editor",
+        toolCallId: "call-write-accepted",
+        input: { path: inside, content: "accepted\n" },
+      });
+      expect(await acceptedWrite).toMatchObject({
+        request_id: "write-accepted",
+        decision: { behavior: "allow" },
+      });
+      expect(permissionRequests).toHaveLength(requestCount);
+    } finally {
+      agent.shutdown();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("scopes always-allow editor decisions to one ACP session", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, permissionRequests } = createContext({
+      permissionOptionId: "allow_always",
+    });
+    const root = await mkdtemp(join(tmpdir(), "letta-acp-editor-always-"));
+    const firstWorkspace = join(root, "first");
+    const secondWorkspace = join(root, "second");
+    const outside = join(root, "outside.ts");
+    await mkdir(firstWorkspace, { recursive: true });
+    await mkdir(secondWorkspace, { recursive: true });
+    await writeFile(outside, "outside\n");
+
+    try {
+      const first = await openSession(agent, context, firstWorkspace);
+      await agent.prompt(
+        {
+          sessionId: first.sessionId,
+          prompt: [{ type: "text", text: "plain prompt" }],
+        },
+        context,
+      );
+      for (const requestId of ["first-read", "first-read-again"]) {
+        const approval = server.nextApprovalResponse();
+        server.requestPermissionAfterPrompt({
+          requestId,
+          toolName: "read_editor_buffer",
+          toolCallId: `call-${requestId}`,
+          input: { path: outside },
+        });
+        await approval;
+      }
+      expect(permissionRequests).toHaveLength(1);
+
+      const second = await openSession(agent, context, secondWorkspace);
+      await agent.prompt(
+        {
+          sessionId: second.sessionId,
+          prompt: [{ type: "text", text: "plain prompt" }],
+        },
+        context,
+      );
+      const secondApproval = server.nextApprovalResponse();
+      server.requestPermissionAfterPrompt({
+        requestId: "second-read",
+        toolName: "read_editor_buffer",
+        toolCallId: "call-second-read",
+        input: { path: outside },
+      });
+      await secondApproval;
+      expect(permissionRequests).toHaveLength(2);
+    } finally {
+      agent.shutdown();
+      await rm(root, { recursive: true, force: true });
     }
   });
 
