@@ -100,6 +100,13 @@ describe("tool history replay", () => {
       expect.objectContaining({
         sessionUpdate: "tool_call_update",
         status: "completed",
+        content: [
+          { type: "terminal", terminalId: "call-bash" },
+          {
+            type: "content",
+            content: { type: "text", text: "/tmp/project" },
+          },
+        ],
         _meta: {
           terminal_exit: {
             terminal_id: "call-bash",

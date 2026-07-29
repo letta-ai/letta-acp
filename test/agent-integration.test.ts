@@ -1031,6 +1031,13 @@ describe("Agent SDK app-server integration", () => {
           toolCallId: "call-fragmented",
           status: "completed",
           rawOutput: "nothing to commit",
+          content: [
+            { type: "terminal", terminalId: "call-fragmented" },
+            {
+              type: "content",
+              content: { type: "text", text: "nothing to commit" },
+            },
+          ],
           _meta: {
             terminal_exit: {
               terminal_id: "call-fragmented",

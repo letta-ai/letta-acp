@@ -978,6 +978,23 @@ export class LettaAcpAgent {
             ...(locations.length > 0 ? { locations } : {}),
             ...(nativeTerminal
               ? {
+                  // Keep standard ACP text beside Zed's terminal extension. Zed
+                  // uses the terminal when it resolves; if it does not, the text
+                  // keeps the generic execute card expandable instead of leaving
+                  // a copy-only command preview with no visible result.
+                  content: [
+                    {
+                      type: "terminal" as const,
+                      terminalId: message.toolCallId,
+                    },
+                    {
+                      type: "content" as const,
+                      content: {
+                        type: "text" as const,
+                        text: message.content,
+                      },
+                    },
+                  ],
                   _meta: {
                     terminal_exit: {
                       terminal_id: message.toolCallId,

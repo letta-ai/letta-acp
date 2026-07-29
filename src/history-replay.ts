@@ -141,6 +141,20 @@ export function historyToUpdates(
           ...(locations.length > 0 ? { locations } : {}),
           ...(nativeTerminal
             ? {
+                // Preserve a standard ACP fallback for clients that advertise
+                // Zed's terminal extension but cannot resolve a replayed
+                // display terminal into an expandable card.
+                ...(text
+                  ? {
+                      content: [
+                        { type: "terminal" as const, terminalId: toolCallId },
+                        {
+                          type: "content" as const,
+                          content: { type: "text" as const, text },
+                        },
+                      ],
+                    }
+                  : {}),
                 _meta: {
                   terminal_exit: {
                     terminal_id: toolCallId,
