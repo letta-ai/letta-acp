@@ -100,17 +100,31 @@ buzz-acp
 
 In Buzz Desktop, pick **Letta** in the agent's runtime dropdown instead.
 
-Use the `local` or `remote` backend here. The Letta harness runs `Bash` where
-*it* runs, and the agent talks to Buzz by shelling out to the `buzz` CLI — so
-tool execution has to happen on the machine that has the CLI and the
-`BUZZ_*` environment, which the `cloud` sandbox does not. `buzz-acp`
+One Letta agent backs every channel: `buzz-acp` opens one ACP session per
+channel, each becoming its own Letta conversation on the shared agent, so
+memory carries across channels while conversations stay separate. `buzz-acp`
 auto-approves permission requests, so the default `standard` mode is fine;
 set `LETTA_ACP_PERMISSION_MODE=unrestricted` to skip the approval round trip
 per tool call.
 
-One Letta agent backs every channel: `buzz-acp` opens one ACP session per
-channel, each becoming its own Letta conversation on the shared agent, so
-memory carries across channels while conversations stay separate.
+### Choosing a backend
+
+All four backends work, but they put tool execution in different places, and
+the agent answers Buzz by shelling out to the `buzz` CLI — so the CLI and the
+`BUZZ_*` environment have to be wherever the tools run:
+
+| Backend | Agent state | Tools run | Buzz CLI |
+|---------|-------------|-----------|----------|
+| `local` (default) | on this machine | on this machine | inherited from `buzz-acp` ✅ |
+| `cloud-oauth` | Letta Cloud | on this machine | inherited from `buzz-acp` ✅ |
+| `remote` | your app server | on the app server | install it there |
+| `cloud` | Letta Cloud | Letta's sandbox | not present — use MCP (below) |
+
+With `cloud`, reach Buzz through an MCP server instead: MCP servers named in
+`session/new` are spawned by *this adapter*, so their tools execute next to
+the `buzz` CLI even when the agent's own tools do not. Point the harness at
+one with `BUZZ_ACP_MCP_COMMAND` (`buzz-dev-mcp` ships with Buzz and exposes
+shell, file, and search tools).
 
 ## Configuration
 
