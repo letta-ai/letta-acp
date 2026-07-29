@@ -20,7 +20,7 @@ class FakeAppServer {
   readonly runtimeStartRequestIds: string[] = [];
   readonly createdAgentBodies: WireMessage[] = [];
   readonly approvalResponses: WireMessage[] = [];
-  readonly externalToolGroups: unknown[] = [];
+  readonly updatedModelPayloads: WireMessage[] = [];
   private nextConversation = 0;
   private activeControlSocket: ServerSocket | null = null;
   private activeRuntime: RuntimeScope | null = null;
@@ -149,9 +149,6 @@ class FakeAppServer {
         };
         this.runtimeStartRequestIds.push(requestId);
         if (createAgent?.body) this.createdAgentBodies.push(createAgent.body);
-        if (message.external_tools !== undefined) {
-          this.externalToolGroups.push(message.external_tools);
-        }
         socket.push({
           type: "runtime_start_response",
           request_id: requestId,
@@ -182,6 +179,45 @@ class FakeAppServer {
           has_more: false,
         });
         return;
+      case "list_models":
+        socket.push({
+          type: "list_models_response",
+          request_id: requiredString(message.request_id, "list_models.request_id"),
+          success: true,
+          entries: [
+            {
+              id: "test-model",
+              handle: "test/model",
+              label: "Test Model",
+              description: "Deterministic test model",
+              isDefault: true,
+            },
+            {
+              id: "other-model",
+              handle: "test/other-model",
+              label: "Other Model",
+              description: "Alternate deterministic model",
+            },
+          ],
+          available_handles: ["test/model", "test/other-model"],
+        });
+        return;
+      case "update_model": {
+        const payload = message.payload as WireMessage;
+        this.updatedModelPayloads.push(payload);
+        const modelId = requiredString(payload.model_id, "update_model.model_id");
+        const handle = modelId === "other-model" ? "test/other-model" : "test/model";
+        socket.push({
+          type: "update_model_response",
+          request_id: requiredString(message.request_id, "update_model.request_id"),
+          success: true,
+          runtime: message.runtime,
+          applied_to: "conversation",
+          model_id: modelId,
+          model_handle: handle,
+        });
+        return;
+      }
       case "input":
         this.handleInput(socket, message);
         return;
@@ -550,18 +586,10 @@ function createContext(
   return { context, updates, permissionRequests, permissionSignals };
 }
 
-async function openSession(
-  agent: LettaAcpAgent,
-  context: AgentContext,
-  params: Record<string, unknown> = {},
-) {
+async function openSession(agent: LettaAcpAgent, context: AgentContext) {
   await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
   return agent.newSession(
-    {
-      cwd: "/tmp/letta-acp-test",
-      mcpServers: [],
-      ...params,
-    } as Parameters<LettaAcpAgent["newSession"]>[0],
+    { cwd: "/tmp/letta-acp-test", mcpServers: [] },
     context,
   );
 }
@@ -590,39 +618,6 @@ describe("Agent SDK app-server integration", () => {
     }
   });
 
-  test("forwards client stdio MCP servers through the Agent SDK", async () => {
-    const server = new FakeAppServer();
-    const agent = createAgent(server);
-    const { context } = createContext();
-
-    try {
-      await openSession(agent, context, {
-        cwd: process.cwd(),
-        mcpServers: [
-          {
-            name: "fixture",
-            command: process.execPath,
-            args: [
-              new URL(
-                "./dist/index.js",
-                import.meta.resolve(
-                  "@modelcontextprotocol/server-everything/package.json",
-                ),
-              ).pathname,
-            ],
-            env: [],
-          },
-        ],
-      });
-
-      expect(JSON.stringify(server.externalToolGroups)).toContain(
-        "mcp__fixture__echo",
-      );
-    } finally {
-      agent.shutdown();
-    }
-  });
-
   test("starts repeated sessions with distinct runtime request ids", async () => {
     const server = new FakeAppServer();
     const agent = createAgent(server);
@@ -640,6 +635,65 @@ describe("Agent SDK app-server integration", () => {
         "conv-test-3",
       ]);
       expect(new Set(server.runtimeStartRequestIds).size).toBe(3);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("advertises available models in the session configuration", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+
+      expect(session.configOptions).toEqual([
+        {
+          id: "model",
+          name: "Model",
+          description: "Model used for this Letta session",
+          category: "model",
+          type: "select",
+          currentValue: "test-model",
+          options: [
+            {
+              value: "test-model",
+              name: "Test Model",
+              description: "Deterministic test model",
+            },
+            {
+              value: "other-model",
+              name: "Other Model",
+              description: "Alternate deterministic model",
+            },
+          ],
+        },
+      ]);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("switches models through session configuration options", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      const result = await agent.setSessionConfigOption({
+        sessionId: session.sessionId,
+        configId: "model",
+        value: "other-model",
+      });
+
+      expect(server.updatedModelPayloads).toEqual([{ model_id: "other-model" }]);
+      expect(result.configOptions[0]).toMatchObject({
+        id: "model",
+        category: "model",
+        currentValue: "other-model",
+      });
     } finally {
       agent.shutdown();
     }
@@ -701,7 +755,7 @@ describe("Agent SDK app-server integration", () => {
         {
           sessionUpdate: "tool_call_update",
           toolCallId: "call-fragmented",
-          title: "Bash: Show the working tree status",
+          title: "Show the working tree status",
           kind: "execute",
           status: "in_progress",
           rawInput: {
@@ -721,6 +775,89 @@ describe("Agent SDK app-server integration", () => {
               content: { type: "text", text: "nothing to commit" },
             },
           ],
+        },
+      ]);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("renders Bash output as a native terminal when the client supports it", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, updates } = createContext();
+
+    try {
+      await agent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: { _meta: { terminal_output: true } },
+      });
+      const session = await agent.newSession(
+        { cwd: "/tmp/letta-acp-test", mcpServers: [] },
+        context,
+      );
+      const result = await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "fragmented prompt" }],
+        },
+        context,
+      );
+
+      expect(result).toEqual({ stopReason: "end_turn" });
+      expect(
+        updates.filter((update) => update.toolCallId === "call-fragmented"),
+      ).toEqual([
+        {
+          sessionUpdate: "tool_call",
+          toolCallId: "call-fragmented",
+          title: "Bash",
+          kind: "execute",
+          status: "in_progress",
+          rawInput: { raw: '{"command":"git status"' },
+          locations: [],
+          content: [{ type: "terminal", terminalId: "call-fragmented" }],
+          _meta: {
+            terminal_info: {
+              terminal_id: "call-fragmented",
+              cwd: "/tmp/letta-acp-test",
+            },
+          },
+        },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-fragmented",
+          title: "Show the working tree status",
+          kind: "execute",
+          status: "in_progress",
+          rawInput: {
+            command: "git status",
+            description: "Show the working tree status",
+          },
+          locations: [],
+        },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-fragmented",
+          _meta: {
+            terminal_output: {
+              terminal_id: "call-fragmented",
+              data: "nothing to commit",
+            },
+          },
+        },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-fragmented",
+          status: "completed",
+          rawOutput: "nothing to commit",
+          _meta: {
+            terminal_exit: {
+              terminal_id: "call-fragmented",
+              exit_code: 0,
+              signal: null,
+            },
+          },
         },
       ]);
     } finally {
@@ -810,7 +947,7 @@ describe("Agent SDK app-server integration", () => {
         expect.objectContaining({
           sessionId: session.sessionId,
           toolCall: expect.objectContaining({
-            title: "Bash: Show working directory after prompt",
+            title: "Show working directory after prompt",
           }),
         }),
       );

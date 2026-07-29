@@ -128,6 +128,10 @@ export function toolDiffContent(
   return [];
 }
 
+export function isTerminalOutputTool(toolName: string): boolean {
+  return toolName.toLowerCase() === "bash";
+}
+
 /** Parse tool output for ACP rawOutput while preserving non-JSON text. */
 export function parseToolOutput(content: string): unknown {
   try {
@@ -142,6 +146,13 @@ export function toolTitle(
   toolName: string,
   toolInput: Record<string, unknown>,
 ): string {
+  if (isTerminalOutputTool(toolName)) {
+    return (
+      firstString(toolInput, ["description"]) ??
+      firstString(toolInput, ["command"]) ??
+      toolName
+    );
+  }
   const detail =
     firstString(toolInput, [
       "file_path",

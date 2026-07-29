@@ -191,10 +191,12 @@ adapter and delegate to the ACP client.
 | `session/cancel` → `stopReason: cancelled` | ✅ |
 | `session/load` (resume threads with history replay) | ✅ |
 | Session modes (`session/set_mode`: standard / acceptEdits / unrestricted) | ✅ |
+| Model listing and switching (`configOptions` + `session/set_config_option`) | ✅ |
 | Slash commands (`available_commands_update`, ~30 commands + skills) | ✅ |
 | Client fs delegation (`fs/read_text_file`, `fs/write_text_file`) | ✅ via external tools |
 | MCP servers from `session/new` / `session/load` | ✅ stdio, via Agent SDK external tools |
-| Client terminal delegation (`terminal/*`) | ❌ (planned) |
+| Native Bash result rendering (`_meta.terminal_output`) | ✅ when supported by the client |
+| Client-side command execution (`terminal/*`) | ❌ (planned) |
 | Plan updates (`plan` from TodoWrite) | ❌ (planned) |
 
 ACP session ids are Letta conversation ids, so `session/load` works across
@@ -237,6 +239,10 @@ history ≈ `/resume`).
 - `session/prompt` sends the message and pumps `session.stream()`, translating
   SDK messages (`assistant`, `reasoning`, `tool_call`, `tool_result`) into
   `session/update` notifications.
+- When the client advertises `_meta.terminal_output`, Bash calls use ACP terminal
+  content plus `terminal_info`, `terminal_output`, and `terminal_exit` updates.
+  Zed controls whether terminal cards start expanded or collapsed; the adapter
+  sends the complete output and retains it in `rawOutput`.
 - Tool approvals: the SDK's `canUseTool` callback is forwarded as an ACP
   `session/request_permission` request. One Letta-specific wrinkle: the
   app-server transport ends the turn with a recoverable `approval_conflict`

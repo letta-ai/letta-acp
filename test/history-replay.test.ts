@@ -58,6 +58,59 @@ describe("tool history replay", () => {
     expect(updates[1]).not.toHaveProperty("content");
   });
 
+  test("replays Bash output through native terminal metadata when supported", () => {
+    const updates = historyToUpdates(
+      [
+        {
+          message_type: "tool_call_message",
+          tool_calls: [
+            {
+              tool_call_id: "call-bash",
+              name: "Bash",
+              arguments: JSON.stringify({ command: "pwd" }),
+            },
+          ],
+        },
+        {
+          message_type: "tool_return_message",
+          tool_call_id: "call-bash",
+          status: "success",
+          tool_return: "/tmp/project",
+        },
+      ],
+      { terminalOutput: true, cwd: "/tmp/project" },
+    );
+
+    expect(updates).toEqual([
+      expect.objectContaining({
+        sessionUpdate: "tool_call",
+        status: "in_progress",
+        content: [{ type: "terminal", terminalId: "call-bash" }],
+        _meta: {
+          terminal_info: { terminal_id: "call-bash", cwd: "/tmp/project" },
+        },
+      }),
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "call-bash",
+        _meta: {
+          terminal_output: { terminal_id: "call-bash", data: "/tmp/project" },
+        },
+      },
+      expect.objectContaining({
+        sessionUpdate: "tool_call_update",
+        status: "completed",
+        _meta: {
+          terminal_exit: {
+            terminal_id: "call-bash",
+            exit_code: 0,
+            signal: null,
+          },
+        },
+      }),
+    ]);
+  });
+
   test("preserves text output for non-edit tools", () => {
     const updates = historyToUpdates([
       {

@@ -1,5 +1,6 @@
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import {
+  isTerminalOutputTool,
   parseToolOutput,
   toolDiffContent,
   toolKind,
@@ -13,9 +14,13 @@ import {
  * payloads for session/load replay. Tolerant of unknown shapes: anything we
  * can't map is skipped.
  */
-export function historyToUpdates(messages: unknown[]): SessionUpdate[] {
+export function historyToUpdates(
+  messages: unknown[],
+  options: { terminalOutput?: boolean; cwd?: string } = {},
+): SessionUpdate[] {
   const updates: SessionUpdate[] = [];
   const toolInputs = new Map<string, Record<string, unknown>>();
+  const toolNames = new Map<string, string>();
   const diffToolCalls = new Set<string>();
   for (const raw of messages) {
     if (!raw || typeof raw !== "object") continue;
@@ -70,17 +75,32 @@ export function historyToUpdates(messages: unknown[]): SessionUpdate[] {
         const toolName = readString(toolCall, ["name"]) ?? "tool";
         const input = parseArguments(toolCall.arguments);
         const diffContent = toolDiffContent(toolName, input);
+        const nativeTerminal =
+          options.terminalOutput === true && isTerminalOutputTool(toolName);
         toolInputs.set(toolCallId, input);
+        toolNames.set(toolCallId, toolName);
         if (diffContent.length > 0) diffToolCalls.add(toolCallId);
         updates.push({
           sessionUpdate: "tool_call",
           toolCallId,
           title: toolTitle(toolName, input),
           kind: toolKind(toolName),
-          status: "completed",
+          status: nativeTerminal ? "in_progress" : "completed",
           rawInput: input,
           locations: toolLocations(input),
-          ...(diffContent.length > 0 ? { content: diffContent } : {}),
+          ...(diffContent.length > 0
+            ? { content: diffContent }
+            : nativeTerminal
+              ? {
+                  content: [{ type: "terminal", terminalId: toolCallId }],
+                  _meta: {
+                    terminal_info: {
+                      terminal_id: toolCallId,
+                      ...(options.cwd ? { cwd: options.cwd } : {}),
+                    },
+                  },
+                }
+              : {}),
         });
         break;
       }
@@ -92,25 +112,53 @@ export function historyToUpdates(messages: unknown[]): SessionUpdate[] {
         const failed = message.status === "error";
         const rawOutput = text !== undefined ? parseToolOutput(text) : undefined;
         const input = toolInputs.get(toolCallId);
+        const toolName = toolNames.get(toolCallId);
         const hasDiff = diffToolCalls.has(toolCallId);
+        const nativeTerminal =
+          options.terminalOutput === true &&
+          toolName !== undefined &&
+          isTerminalOutputTool(toolName);
         toolInputs.delete(toolCallId);
+        toolNames.delete(toolCallId);
         diffToolCalls.delete(toolCallId);
         const locations = input
           ? toolLocations(input, toolOutputLine(rawOutput))
           : [];
+        if (nativeTerminal && text !== undefined) {
+          updates.push({
+            sessionUpdate: "tool_call_update",
+            toolCallId,
+            _meta: {
+              terminal_output: { terminal_id: toolCallId, data: text },
+            },
+          });
+        }
         updates.push({
           sessionUpdate: "tool_call_update",
           toolCallId,
           status: failed ? "failed" : "completed",
           ...(rawOutput !== undefined ? { rawOutput } : {}),
           ...(locations.length > 0 ? { locations } : {}),
-          ...(text && (!hasDiff || failed)
+          ...(nativeTerminal
             ? {
-                content: [
-                  { type: "content", content: { type: "text", text } },
-                ],
+                _meta: {
+                  terminal_exit: {
+                    terminal_id: toolCallId,
+                    exit_code: failed ? 1 : 0,
+                    signal: null,
+                  },
+                },
               }
-            : {}),
+            : text && (!hasDiff || failed)
+              ? {
+                  content: [
+                    {
+                      type: "content",
+                      content: { type: "text", text },
+                    },
+                  ],
+                }
+              : {}),
         });
         break;
       }
