@@ -305,6 +305,17 @@ export class LettaAcpAgent {
       log,
     });
     const tools = [...editorTools, ...mcp.tools];
+    if (tools.length > 0 && this.config.clientOptions.backend === "cloud") {
+      // Cloud agents run their harness in Letta's sandbox, which has no
+      // executor for tools that live in this process: the server answers such
+      // a call with "External tool executor not set". Say so once at session
+      // setup rather than leaving it to a failed tool call mid-turn.
+      log(
+        `warning: the cloud backend cannot execute adapter-side tools (${tools
+          .map((tool) => tool.name)
+          .join(", ")}); use LETTA_ACP_BACKEND=cloud-oauth for cloud agents with local tool execution`,
+      );
+    }
     const sessionOptions = {
       cwd: options.cwd,
       model: this.config.model,

@@ -118,13 +118,15 @@ the agent answers Buzz by shelling out to the `buzz` CLI — so the CLI and the
 | `local` (default) | on this machine | on this machine | inherited from `buzz-acp` ✅ |
 | `cloud-oauth` | Letta Cloud | on this machine | inherited from `buzz-acp` ✅ |
 | `remote` | your app server | on the app server | install it there |
-| `cloud` | Letta Cloud | Letta's sandbox | not present — use MCP (below) |
+| `cloud` | Letta Cloud | Letta's sandbox | not reachable |
 
-With `cloud`, reach Buzz through an MCP server instead: MCP servers named in
-`session/new` are spawned by *this adapter*, so their tools execute next to
-the `buzz` CLI even when the agent's own tools do not. Point the harness at
-one with `BUZZ_ACP_MCP_COMMAND` (`buzz-dev-mcp` ships with Buzz and exposes
-shell, file, and search tools).
+`cloud-oauth` is the one to use for cloud-hosted agents: it keeps agent state
+in Letta Cloud while the harness — and so every tool — runs here, next to the
+CLI. Plain `cloud` puts the harness in Letta's sandbox, which has no `buzz`
+CLI, and adapter-side tools are no help either: the sandbox has no executor
+for them, so both the editor fs tools and MCP tools fail there with
+"External tool executor not set". The adapter logs a warning at session setup
+when that combination comes up.
 
 ## Configuration
 
