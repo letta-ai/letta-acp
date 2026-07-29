@@ -24,6 +24,8 @@ class FakeAppServer {
   readonly externalToolGroups: unknown[] = [];
   /** Message payloads the adapter sent as prompts, oldest first. */
   readonly promptPayloads: WireMessage[] = [];
+  /** update_model payloads the adapter sent, oldest first. */
+  readonly modelUpdates: WireMessage[] = [];
   private nextConversation = 0;
   private activeControlSocket: ServerSocket | null = null;
   private activeRuntime: RuntimeScope | null = null;
@@ -171,6 +173,49 @@ class FakeAppServer {
           request_id: requiredString(message.request_id, "enable_memfs.request_id"),
           success: true,
           memory_directory: "/tmp/letta-acp-memory",
+        });
+        return;
+      case "list_models":
+        socket.push({
+          type: "list_models_response",
+          request_id: requiredString(message.request_id, "list_models.request_id"),
+          success: true,
+          entries: [
+            {
+              id: "sonnet",
+              handle: "anthropic/claude-sonnet-4",
+              label: "Claude Sonnet 4",
+              description: "Balanced",
+              isDefault: true,
+            },
+            {
+              id: "opus",
+              handle: "anthropic/claude-opus-4",
+              label: "Claude Opus 4",
+              description: "Most capable",
+            },
+            {
+              id: "hidden",
+              handle: "openai/gpt-4.1",
+              label: "GPT-4.1",
+              description: "Not available to this user",
+            },
+          ],
+          available_handles: [
+            "anthropic/claude-sonnet-4",
+            "anthropic/claude-opus-4",
+          ],
+        });
+        return;
+      case "update_model":
+        this.modelUpdates.push(message.payload as WireMessage);
+        socket.push({
+          type: "update_model_response",
+          request_id: requiredString(message.request_id, "update_model.request_id"),
+          success: true,
+          applied_to: "agent",
+          model_handle: (message.payload as { model_handle?: string })
+            ?.model_handle,
         });
         return;
       case "conversation_messages_list":
@@ -504,6 +549,7 @@ function createAgent(
   server: FakeAppServer,
   overrides: {
     agentId?: string;
+    model?: string;
     outOfTurnPermissionTimeoutMs?: number;
     prematureResultGraceMs?: number;
   } = {},
@@ -1059,6 +1105,112 @@ describe("Agent SDK app-server integration", () => {
       await agent.cancel({ sessionId: session.sessionId });
 
       expect(await prompt).toEqual({ stopReason: "cancelled" });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("publishes the model catalog as a session config option", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+
+      // Compared as plain JSON: the pre-rename aliases are deliberately
+      // outside the current schema type.
+      expect(session.configOptions as unknown).toEqual([
+        {
+          id: "model",
+          // Pre-rename spellings ride along for clients that read only those.
+          configId: "model",
+          name: "Model",
+          displayName: "Model",
+          category: "model",
+          type: "select",
+          // Handles the availability lookup excluded are dropped, and the
+          // catalog default is preselected.
+          currentValue: "anthropic/claude-sonnet-4",
+          options: [
+            {
+              value: "anthropic/claude-sonnet-4",
+              name: "Claude Sonnet 4",
+              displayName: "Claude Sonnet 4",
+              description: "Balanced",
+            },
+            {
+              value: "anthropic/claude-opus-4",
+              name: "Claude Opus 4",
+              displayName: "Claude Opus 4",
+              description: "Most capable",
+            },
+          ],
+        },
+      ]);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("preselects the configured model override", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server, { model: "anthropic/claude-opus-4" });
+    const { context } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      const option = session.configOptions?.[0];
+
+      expect(option && "currentValue" in option ? option.currentValue : null).toBe(
+        "anthropic/claude-opus-4",
+      );
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("switches the model through session/set_config_option", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      const result = await agent.setSessionConfigOption({
+        sessionId: session.sessionId,
+        configId: "model",
+        value: "anthropic/claude-opus-4",
+      });
+
+      // Handles (provider/model) ride as model_handle, not the loose model id.
+      expect(server.modelUpdates).toEqual([
+        { model_handle: "anthropic/claude-opus-4" },
+      ]);
+      const option = result.configOptions[0];
+      expect(option && "currentValue" in option ? option.currentValue : null).toBe(
+        "anthropic/claude-opus-4",
+      );
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("rejects config options it does not publish", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+
+      expect(
+        agent.setSessionConfigOption({
+          sessionId: session.sessionId,
+          configId: "thinking",
+          value: "high",
+        }),
+      ).rejects.toThrow("Unknown config option: thinking");
     } finally {
       agent.shutdown();
     }

@@ -15,6 +15,9 @@ import {
   type PromptRequest,
   type PromptResponse,
   type RequestPermissionResponse,
+  type SessionConfigOption,
+  type SetSessionConfigOptionRequest,
+  type SetSessionConfigOptionResponse,
   type SetSessionModeRequest,
   type SetSessionModeResponse,
   type StopReason,
@@ -37,6 +40,11 @@ import {
 } from "./editor-tools.js";
 import { historyToUpdates } from "./history-replay.js";
 import { connectMcpServers, type McpBridge } from "./mcp-tools.js";
+import {
+  buildModelOption,
+  MODEL_CONFIG_ID,
+  withCurrentValue,
+} from "./model-options.js";
 import { withAcpRequestTimeout } from "./request-timeout.js";
 import {
   isSessionModeId,
@@ -85,6 +93,8 @@ interface AcpSessionState {
   cwd: string;
   /** MCP servers the client attached to this session. */
   mcp: McpBridge;
+  /** Session config options published to the client (the model selector). */
+  configOptions: SessionConfigOption[];
   /**
    * Client-supplied system prompt awaiting delivery, prepended to the next
    * prompt because Letta has no per-session system prompt to set.
@@ -121,6 +131,13 @@ const DEFAULT_OUT_OF_TURN_PERMISSION_TIMEOUT_MS = 300_000;
  */
 const DEFAULT_PREMATURE_RESULT_GRACE_MS = 30_000;
 
+/**
+ * How long `session/new` waits for the model catalog before answering without
+ * one. Clients read the model picker off the session response, so the lookup
+ * is worth a brief wait — but never at the cost of session creation.
+ */
+const MODEL_CATALOG_DEADLINE_MS = 2_000;
+
 /** Safety cap on stream rounds while waiting for a slash command to finish. */
 const EXECUTE_COMMAND_MAX_ROUNDS = 50;
 
@@ -152,6 +169,7 @@ export class LettaAcpAgent {
   private readonly prematureResultGraceMs: number;
   private readonly sessions = new Map<string, AcpSessionState>();
   private agentIdPromise: Promise<string> | null = null;
+  private modelOptionPromise: Promise<SessionConfigOption | null> | null = null;
   private clientFsCaps: EditorFsCapabilities = {
     readTextFile: false,
     writeTextFile: false,
@@ -210,7 +228,14 @@ export class LettaAcpAgent {
     });
     log(`session ${sessionId} -> agent ${agentId} (cwd: ${params.cwd})`);
     this.announceCommands(sessionId, cx);
-    return { sessionId, modes: sessionModeState(state.modeId) };
+    this.publishLateModelOptions(sessionId, state, cx);
+    return {
+      sessionId,
+      modes: sessionModeState(state.modeId),
+      ...(state.configOptions.length > 0
+        ? { configOptions: state.configOptions }
+        : {}),
+    };
   }
 
   async loadSession(
@@ -248,7 +273,40 @@ export class LettaAcpAgent {
     }
     log(`loaded session ${sessionId} (${updates.length} replayed updates)`);
     this.announceCommands(sessionId, cx);
-    return { modes: sessionModeState(state.modeId) };
+    this.publishLateModelOptions(sessionId, state, cx);
+    return {
+      modes: sessionModeState(state.modeId),
+      ...(state.configOptions.length > 0
+        ? { configOptions: state.configOptions }
+        : {}),
+    };
+  }
+
+  /**
+   * Applies a client's config-option change. Only the model selector is
+   * published, so `model` is the only id that can arrive here.
+   */
+  async setSessionConfigOption(
+    params: SetSessionConfigOptionRequest,
+  ): Promise<SetSessionConfigOptionResponse> {
+    const state = this.sessions.get(params.sessionId);
+    if (!state) {
+      throw new Error(`Unknown session: ${params.sessionId}`);
+    }
+    if (params.configId !== MODEL_CONFIG_ID) {
+      throw new Error(`Unknown config option: ${params.configId}`);
+    }
+    const value = params.value;
+    if (typeof value !== "string") {
+      throw new Error("The model option takes a model handle");
+    }
+    const result = await state.session.updateModel(value);
+    const applied = result.modelHandle ?? result.modelId ?? value;
+    state.configOptions = state.configOptions.map((option) =>
+      option.id === MODEL_CONFIG_ID ? withCurrentValue(option, applied) : option,
+    );
+    log(`session ${params.sessionId} model -> ${applied}`);
+    return { configOptions: state.configOptions };
   }
 
   async setSessionMode(
@@ -367,9 +425,83 @@ export class LettaAcpAgent {
       cwd: options.cwd,
       mcp,
       pendingSystemPrompt: options.systemPrompt?.trim() || null,
+      configOptions: await this.modelConfigOptions(session),
     };
     this.sessions.set(sessionId, state);
     return { sessionId, state };
+  }
+
+  /**
+   * The session's model selector, or none if the catalog is not ready in time.
+   *
+   * A model list is a nicety, not a precondition for talking to the agent, so
+   * the lookup never blocks `session/new` for longer than
+   * {@link MODEL_CATALOG_DEADLINE_MS}. A late or failed catalog leaves the
+   * session without a picker; {@link publishLateModelOptions} pushes one to
+   * the client if the lookup lands after the response has gone out.
+   */
+  private async modelConfigOptions(
+    session: LettaCodeSession,
+  ): Promise<SessionConfigOption[]> {
+    const catalog = this.modelOption(session);
+    const timedOut = Symbol("timeout");
+    const raced = await Promise.race([
+      catalog,
+      new Promise<typeof timedOut>((resolve) =>
+        setTimeout(() => resolve(timedOut), MODEL_CATALOG_DEADLINE_MS).unref?.(),
+      ),
+    ]);
+    if (raced === timedOut) {
+      log("model catalog is still loading; opening the session without it");
+      return [];
+    }
+    return raced ? [raced] : [];
+  }
+
+  /** Sends the model selector once a slow catalog lookup finishes. */
+  private publishLateModelOptions(
+    sessionId: string,
+    state: AcpSessionState,
+    cx: AgentContext,
+  ): void {
+    if (state.configOptions.length > 0) return;
+    void this.modelOption(state.session).then((option) => {
+      if (!option || state.configOptions.length > 0) return;
+      state.configOptions = [option];
+      void cx.notify(methods.client.session.update, {
+        sessionId,
+        update: { sessionUpdate: "config_option_update", configOptions: [option] },
+      });
+    });
+  }
+
+  /**
+   * The model selector for this adapter's agent, fetched once per process.
+   *
+   * The catalog is a property of the backend, not of a session, so the first
+   * lookup is shared: later sessions publish their picker without a round trip.
+   */
+  private modelOption(
+    session: LettaCodeSession,
+  ): Promise<SessionConfigOption | null> {
+    this.modelOptionPromise ??= session
+      .listModels()
+      .then((models) => {
+        const option = buildModelOption(models, this.config.model);
+        if (!option) {
+          log("no models available for this agent; no model selector");
+          return null;
+        }
+        const count = option.type === "select" ? option.options.length : 0;
+        log(`advertising ${count} models (current: ${option.currentValue})`);
+        return option;
+      })
+      .catch((error) => {
+        log(`could not list models: ${String(error)}`);
+        this.modelOptionPromise = null;
+        return null;
+      });
+    return this.modelOptionPromise;
   }
 
   private announceCommands(sessionId: string, cx: AgentContext): void {
