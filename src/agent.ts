@@ -49,6 +49,7 @@ import {
 } from "./slash-commands.js";
 import {
   accumulateToolInput,
+  isTerminalOutputTool,
   parseToolOutput,
   type ToolCallInputState,
   toolDiffContent,
@@ -64,6 +65,8 @@ interface StreamedToolCall {
   input: ToolCallInputState;
   /** Whether the ACP card already contains a native diff. */
   hasDiff: boolean;
+  /** Whether terminal_info has created a native terminal for this call. */
+  hasTerminal: boolean;
 }
 
 interface AcpSessionState {
@@ -139,6 +142,7 @@ export class LettaAcpAgent {
   private readonly prematureResultGraceMs: number;
   private readonly sessions = new Map<string, AcpSessionState>();
   private agentIdPromise: Promise<string> | null = null;
+  private supportsTerminalOutput = false;
   private clientFsCaps: EditorFsCapabilities = {
     readTextFile: false,
     writeTextFile: false,
@@ -156,6 +160,8 @@ export class LettaAcpAgent {
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     const fs = params.clientCapabilities?.fs;
+    this.supportsTerminalOutput =
+      params.clientCapabilities?._meta?.terminal_output === true;
     this.clientFsCaps = {
       readTextFile: fs?.readTextFile === true,
       writeTextFile: fs?.writeTextFile === true,
@@ -228,7 +234,10 @@ export class LettaAcpAgent {
         `session ${sessionId} has more than ${LOAD_HISTORY_LIMIT} messages; replaying the most recent ${LOAD_HISTORY_LIMIT}`,
       );
     }
-    const updates = historyToUpdates([...history.messages].reverse());
+    const updates = historyToUpdates([...history.messages].reverse(), {
+      terminalOutput: this.supportsTerminalOutput,
+      cwd: state.cwd,
+    });
     for (const update of updates) {
       await cx.notify(methods.client.session.update, { sessionId, update });
     }
@@ -772,7 +781,15 @@ export class LettaAcpAgent {
         );
         const diffContent = toolDiffContent(toolName, input.input);
         const hasDiff = existing?.hasDiff === true || diffContent.length > 0;
-        state.toolCalls.set(message.toolCallId, { toolName, input, hasDiff });
+        const nativeTerminal =
+          this.supportsTerminalOutput && isTerminalOutputTool(toolName);
+        const addTerminal = nativeTerminal && existing?.hasTerminal !== true;
+        state.toolCalls.set(message.toolCallId, {
+          toolName,
+          input,
+          hasDiff,
+          hasTerminal: existing?.hasTerminal === true || addTerminal,
+        });
         state.lastToolCall = { id: message.toolCallId, name: toolName };
         // Partial JSON has no usable title or locations, so hold the card
         // steady until the arguments parse rather than flickering through
@@ -793,7 +810,19 @@ export class LettaAcpAgent {
             status: "in_progress",
             rawInput: input.input,
             locations: toolLocations(input.input),
-            ...(diffContent.length > 0 ? { content: diffContent } : {}),
+            ...(diffContent.length > 0
+              ? { content: diffContent }
+              : addTerminal
+                ? {
+                    content: [{ type: "terminal" as const, terminalId: message.toolCallId }],
+                    _meta: {
+                      terminal_info: {
+                        terminal_id: message.toolCallId,
+                        cwd: state.cwd,
+                      },
+                    },
+                  }
+                : {}),
           },
         });
         return true;
@@ -805,6 +834,24 @@ export class LettaAcpAgent {
         const locations = toolCall
           ? toolLocations(toolCall.input.input, toolOutputLine(rawOutput))
           : [];
+        const nativeTerminal = toolCall?.hasTerminal === true;
+        if (nativeTerminal) {
+          // Zed creates the display-only terminal from terminal_info on the
+          // initial call, then consumes output and exit as ordered updates.
+          await cx.notify(methods.client.session.update, {
+            sessionId,
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId: message.toolCallId,
+              _meta: {
+                terminal_output: {
+                  terminal_id: message.toolCallId,
+                  data: message.content,
+                },
+              },
+            },
+          });
+        }
         await cx.notify(methods.client.session.update, {
           sessionId,
           update: {
@@ -813,16 +860,29 @@ export class LettaAcpAgent {
             status: message.isError ? "failed" : "completed",
             rawOutput,
             ...(locations.length > 0 ? { locations } : {}),
-            ...(toolCall?.hasDiff !== true || message.isError
+            ...(nativeTerminal
               ? {
-                  content: [
-                    {
-                      type: "content" as const,
-                      content: { type: "text" as const, text: message.content },
+                  _meta: {
+                    terminal_exit: {
+                      terminal_id: message.toolCallId,
+                      exit_code: message.isError ? 1 : 0,
+                      signal: null,
                     },
-                  ],
+                  },
                 }
-              : {}),
+              : toolCall?.hasDiff !== true || message.isError
+                ? {
+                    content: [
+                      {
+                        type: "content" as const,
+                        content: {
+                          type: "text" as const,
+                          text: message.content,
+                        },
+                      },
+                    ],
+                  }
+                : {}),
           },
         });
         return true;

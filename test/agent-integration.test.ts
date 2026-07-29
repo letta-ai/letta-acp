@@ -755,7 +755,7 @@ describe("Agent SDK app-server integration", () => {
         {
           sessionUpdate: "tool_call_update",
           toolCallId: "call-fragmented",
-          title: "Bash: Show the working tree status",
+          title: "Show the working tree status",
           kind: "execute",
           status: "in_progress",
           rawInput: {
@@ -775,6 +775,89 @@ describe("Agent SDK app-server integration", () => {
               content: { type: "text", text: "nothing to commit" },
             },
           ],
+        },
+      ]);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("renders Bash output as a native terminal when the client supports it", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, updates } = createContext();
+
+    try {
+      await agent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: { _meta: { terminal_output: true } },
+      });
+      const session = await agent.newSession(
+        { cwd: "/tmp/letta-acp-test", mcpServers: [] },
+        context,
+      );
+      const result = await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "fragmented prompt" }],
+        },
+        context,
+      );
+
+      expect(result).toEqual({ stopReason: "end_turn" });
+      expect(
+        updates.filter((update) => update.toolCallId === "call-fragmented"),
+      ).toEqual([
+        {
+          sessionUpdate: "tool_call",
+          toolCallId: "call-fragmented",
+          title: "Bash",
+          kind: "execute",
+          status: "in_progress",
+          rawInput: { raw: '{"command":"git status"' },
+          locations: [],
+          content: [{ type: "terminal", terminalId: "call-fragmented" }],
+          _meta: {
+            terminal_info: {
+              terminal_id: "call-fragmented",
+              cwd: "/tmp/letta-acp-test",
+            },
+          },
+        },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-fragmented",
+          title: "Show the working tree status",
+          kind: "execute",
+          status: "in_progress",
+          rawInput: {
+            command: "git status",
+            description: "Show the working tree status",
+          },
+          locations: [],
+        },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-fragmented",
+          _meta: {
+            terminal_output: {
+              terminal_id: "call-fragmented",
+              data: "nothing to commit",
+            },
+          },
+        },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-fragmented",
+          status: "completed",
+          rawOutput: "nothing to commit",
+          _meta: {
+            terminal_exit: {
+              terminal_id: "call-fragmented",
+              exit_code: 0,
+              signal: null,
+            },
+          },
         },
       ]);
     } finally {
@@ -864,7 +947,7 @@ describe("Agent SDK app-server integration", () => {
         expect.objectContaining({
           sessionId: session.sessionId,
           toolCall: expect.objectContaining({
-            title: "Bash: Show working directory after prompt",
+            title: "Show working directory after prompt",
           }),
         }),
       );
