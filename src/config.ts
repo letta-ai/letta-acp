@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type {
   LettaCodeClientOptions,
   PermissionMode,
@@ -12,6 +14,10 @@ export interface LettaAcpConfig {
   model?: string;
   /** Letta permission mode; tool approvals are forwarded to the ACP client. */
   permissionMode: PermissionMode;
+  /** Directory for controller-owned ACP session metadata; null keeps it in memory. */
+  sessionRegistryDir?: string | null;
+  /** Separates records belonging to different Letta backends. */
+  sessionRegistryScope?: string;
   /**
    * Deadline for permission requests raised outside a prompt turn, where the
    * ACP client has no obligation to answer. Defaults to five minutes.
@@ -38,17 +44,21 @@ export function configFromEnv(
   const backend = env.LETTA_ACP_BACKEND ?? "local";
 
   let clientOptions: LettaCodeClientOptions;
+  let sessionRegistryScope = backend;
   switch (backend) {
     case "local":
       clientOptions = { backend: "local" };
       break;
-    case "remote":
+    case "remote": {
+      const url = env.LETTA_APP_SERVER_URL ?? "ws://127.0.0.1:4500";
       clientOptions = {
         backend: "remote",
-        url: env.LETTA_APP_SERVER_URL ?? "ws://127.0.0.1:4500",
+        url,
         authToken: env.LETTA_APP_SERVER_TOKEN,
       };
+      sessionRegistryScope = `remote:${url}`;
       break;
+    }
     case "cloud": {
       const apiKey = env.LETTA_API_KEY;
       if (!apiKey) {
@@ -61,6 +71,7 @@ export function configFromEnv(
       break;
     }
     case "cloud-oauth":
+      sessionRegistryScope = "cloud";
       // Cloud agents authenticated through the letta-code harness rather than
       // an explicit API key: the SDK spawns a local app-server pointed at
       // Letta Cloud, and that harness resolves credentials the same way the
@@ -90,5 +101,8 @@ export function configFromEnv(
     agentId: env.LETTA_AGENT_ID,
     model: env.LETTA_ACP_MODEL,
     permissionMode: permissionMode as PermissionMode,
+    sessionRegistryDir:
+      env.LETTA_ACP_STATE_DIR ?? join(homedir(), ".letta", "letta-acp", "sessions"),
+    sessionRegistryScope,
   };
 }

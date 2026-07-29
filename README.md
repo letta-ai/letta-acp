@@ -190,6 +190,7 @@ adapter and delegate to the ACP client.
 | `session/request_permission` (allow once / always / reject) | ✅ |
 | `session/cancel` → `stopReason: cancelled` | ✅ |
 | `session/load` (resume threads with history replay) | ✅ |
+| `session/list` (project-scoped persisted session discovery) | ✅ |
 | Session modes (`session/set_mode`: standard / acceptEdits / unrestricted) | ✅ |
 | Model listing and switching (`configOptions` + `session/set_config_option`) | ✅ |
 | Slash commands (`available_commands_update`, ~30 commands + skills) | ✅ |
@@ -198,9 +199,14 @@ adapter and delegate to the ACP client.
 | Plan updates (`plan` from TodoWrite) | ❌ (planned) |
 
 ACP session ids are Letta conversation ids, so `session/load` works across
-adapter restarts with no local state: the conversation is resumed via the SDK
-and its recent history (up to 200 messages) is replayed as `session/update`
-notifications. Session modes are enforced in the adapter's permission
+adapter restarts when the client already knows the id: the conversation is
+resumed via the SDK and its recent history (up to 200 messages) is replayed as
+`session/update` notifications. For discovery, the adapter records the working
+directory of successful `session/new` and `session/load` calls under
+`~/.letta/letta-acp/sessions/`. `session/list` combines those project-scoped
+records with live conversation titles and timestamps from the configured Letta
+agent; unrelated conversations are not assigned an inferred project. Session
+modes are enforced in the adapter's permission
 callback — the harness always runs in `standard` mode so every approval routes
 through the adapter, which is what makes live mode switching possible;
 `acceptEdits` auto-allows file-edit tools, `unrestricted` auto-allows
