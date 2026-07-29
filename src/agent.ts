@@ -13,6 +13,9 @@ import {
   type PromptRequest,
   type PromptResponse,
   type RequestPermissionResponse,
+  type SessionConfigOption,
+  type SetSessionConfigOptionRequest,
+  type SetSessionConfigOptionResponse,
   type SetSessionModeRequest,
   type SetSessionModeResponse,
   type StopReason,
@@ -80,6 +83,8 @@ interface AcpSessionState {
   modeId: PermissionMode;
   /** Session working directory (for project skill discovery). */
   cwd: string;
+  /** Model handle reported by the runtime, updated after ACP model changes. */
+  currentModel: string | undefined;
 }
 
 /** Max history messages replayed on session/load. */
@@ -189,7 +194,11 @@ export class LettaAcpAgent {
     });
     log(`session ${sessionId} -> agent ${agentId} (cwd: ${params.cwd})`);
     this.announceCommands(sessionId, cx);
-    return { sessionId, modes: sessionModeState(state.modeId) };
+    return {
+      sessionId,
+      modes: sessionModeState(state.modeId),
+      configOptions: await this.modelConfigOptions(state),
+    };
   }
 
   async loadSession(
@@ -225,7 +234,71 @@ export class LettaAcpAgent {
     }
     log(`loaded session ${sessionId} (${updates.length} replayed updates)`);
     this.announceCommands(sessionId, cx);
-    return { modes: sessionModeState(state.modeId) };
+    return {
+      modes: sessionModeState(state.modeId),
+      configOptions: await this.modelConfigOptions(state),
+    };
+  }
+
+  private async modelConfigOptions(
+    state: AcpSessionState,
+  ): Promise<SessionConfigOption[]> {
+    const { entries } = await state.session.listModels();
+    const models = [...new Map(entries.map((entry) => [entry.id, entry])).values()];
+    const selected = models.find(
+      (entry) =>
+        entry.id === state.currentModel || entry.handle === state.currentModel,
+    );
+    let currentValue =
+      selected?.id ??
+      models.find((entry) => entry.isDefault)?.id ??
+      models[0]?.id;
+    const options = models.map((entry) => ({
+      value: entry.id,
+      name: entry.label,
+      ...(entry.description ? { description: entry.description } : {}),
+    }));
+
+    // A custom model handle may be active even when it is not in the curated
+    // catalog. ACP requires currentValue to identify one of the options, so
+    // retain that model rather than falsely presenting a different selection.
+    if (!selected && state.currentModel) {
+      currentValue = state.currentModel;
+      options.unshift({ value: state.currentModel, name: state.currentModel });
+    }
+    if (!currentValue) return [];
+
+    return [
+      {
+        id: "model",
+        name: "Model",
+        description: "Model used for this Letta session",
+        category: "model",
+        type: "select",
+        currentValue,
+        options,
+      },
+    ];
+  }
+
+  async setSessionConfigOption(
+    params: SetSessionConfigOptionRequest,
+  ): Promise<SetSessionConfigOptionResponse> {
+    const state = this.sessions.get(params.sessionId);
+    if (!state) {
+      throw new Error(`Unknown session: ${params.sessionId}`);
+    }
+    if (params.configId !== "model") {
+      throw new Error(`Unknown session configuration option: ${params.configId}`);
+    }
+    if (typeof params.value !== "string") {
+      throw new Error("The model configuration option requires a model id");
+    }
+
+    const result = await state.session.updateModel(params.value);
+    state.currentModel = result.modelHandle ?? result.modelId ?? params.value;
+    log(`session ${params.sessionId} model -> ${state.currentModel}`);
+    return { configOptions: await this.modelConfigOptions(state) };
   }
 
   async setSessionMode(
@@ -295,8 +368,8 @@ export class LettaAcpAgent {
     const session = options.resumeId
       ? this.client.resumeSession(options.resumeId, sessionOptions)
       : this.client.createSession(options.agentId ?? "", sessionOptions);
-    // Force runtime initialization so the conversation id exists.
-    await session.listMessages({ limit: 1 });
+    // Force runtime initialization so the conversation id and active model exist.
+    const bootstrap = await session.bootstrapState({ limit: 1 });
     const sessionId = options.resumeId ?? session.conversationId;
     if (!sessionId) {
       session.close();
@@ -318,6 +391,7 @@ export class LettaAcpAgent {
       promptActive: false,
       modeId: this.config.permissionMode,
       cwd: options.cwd,
+      currentModel: bootstrap.model ?? this.config.model,
     };
     this.sessions.set(sessionId, state);
     return { sessionId, state };
@@ -457,9 +531,8 @@ export class LettaAcpAgent {
         );
       } else {
         const result = await state.session.updateModel(argument);
-        await reply(
-          `Model switched to \`${result.modelHandle ?? result.modelId ?? argument}\`.`,
-        );
+        state.currentModel = result.modelHandle ?? result.modelId ?? argument;
+        await reply(`Model switched to \`${state.currentModel}\`.`);
       }
     } catch (error) {
       await reply(

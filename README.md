@@ -191,6 +191,7 @@ adapter and delegate to the ACP client.
 | `session/cancel` → `stopReason: cancelled` | ✅ |
 | `session/load` (resume threads with history replay) | ✅ |
 | Session modes (`session/set_mode`: standard / acceptEdits / unrestricted) | ✅ |
+| Model listing and switching (`configOptions` + `session/set_config_option`) | ✅ |
 | Slash commands (`available_commands_update`, ~30 commands + skills) | ✅ |
 | Client fs delegation (`fs/read_text_file`, `fs/write_text_file`) | ✅ via external tools |
 | Client terminal delegation (`terminal/*`) | ❌ (planned) |
