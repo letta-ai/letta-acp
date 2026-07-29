@@ -47,6 +47,8 @@ import { SessionRegistry } from "./session-registry.js";
 import {
   isSessionModeId,
   modeAutoAllows,
+  PERMISSION_MODE_CONFIG_ID,
+  permissionModeConfigOption,
   sessionModeState,
 } from "./session-modes.js";
 import {
@@ -219,7 +221,7 @@ export class LettaAcpAgent {
     return {
       sessionId,
       modes: sessionModeState(state.modeId),
-      configOptions: await this.modelConfigOptions(state),
+      configOptions: await this.sessionConfigOptions(state),
     };
   }
 
@@ -263,7 +265,7 @@ export class LettaAcpAgent {
     this.announceCommands(sessionId, cx);
     return {
       modes: sessionModeState(state.modeId),
-      configOptions: await this.modelConfigOptions(state),
+      configOptions: await this.sessionConfigOptions(state),
     };
   }
 
@@ -344,7 +346,7 @@ export class LettaAcpAgent {
     }
   }
 
-  private async modelConfigOptions(
+  private async sessionConfigOptions(
     state: AcpSessionState,
   ): Promise<SessionConfigOption[]> {
     const { entries } = await state.session.listModels();
@@ -370,10 +372,11 @@ export class LettaAcpAgent {
       currentValue = state.currentModel;
       options.unshift({ value: state.currentModel, name: state.currentModel });
     }
-    if (!currentValue) return [];
-
-    return [
-      {
+    const configOptions: SessionConfigOption[] = [
+      permissionModeConfigOption(state.modeId),
+    ];
+    if (currentValue) {
+      configOptions.push({
         id: "model",
         name: "Model",
         description: "Model used for this Letta session",
@@ -381,8 +384,9 @@ export class LettaAcpAgent {
         type: "select",
         currentValue,
         options,
-      },
-    ];
+      });
+    }
+    return configOptions;
   }
 
   async setSessionConfigOption(
@@ -392,17 +396,24 @@ export class LettaAcpAgent {
     if (!state) {
       throw new Error(`Unknown session: ${params.sessionId}`);
     }
-    if (params.configId !== "model") {
-      throw new Error(`Unknown session configuration option: ${params.configId}`);
+    if (params.configId === PERMISSION_MODE_CONFIG_ID) {
+      if (typeof params.value !== "string" || !isSessionModeId(params.value)) {
+        throw new Error(`Unknown permission mode: ${String(params.value)}`);
+      }
+      state.modeId = params.value;
+      log(`session ${params.sessionId} mode -> ${params.value}`);
+      return { configOptions: await this.sessionConfigOptions(state) };
     }
-    if (typeof params.value !== "string") {
-      throw new Error("The model configuration option requires a model id");
+    if (params.configId === "model") {
+      if (typeof params.value !== "string") {
+        throw new Error("The model configuration option requires a model id");
+      }
+      const result = await state.session.updateModel(params.value);
+      state.currentModel = result.modelHandle ?? result.modelId ?? params.value;
+      log(`session ${params.sessionId} model -> ${state.currentModel}`);
+      return { configOptions: await this.sessionConfigOptions(state) };
     }
-
-    const result = await state.session.updateModel(params.value);
-    state.currentModel = result.modelHandle ?? result.modelId ?? params.value;
-    log(`session ${params.sessionId} model -> ${state.currentModel}`);
-    return { configOptions: await this.modelConfigOptions(state) };
+    throw new Error(`Unknown session configuration option: ${params.configId}`);
   }
 
   async setSessionMode(

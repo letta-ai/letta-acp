@@ -1,4 +1,7 @@
-import type { SessionModeState } from "@agentclientprotocol/sdk";
+import type {
+  SessionConfigOption,
+  SessionModeState,
+} from "@agentclientprotocol/sdk";
 import type { PermissionMode } from "@letta-ai/letta-agent-sdk";
 
 /**
@@ -14,6 +17,26 @@ export const SESSION_MODE_IDS: PermissionMode[] = [
   "acceptEdits",
   "unrestricted",
 ];
+
+export const PERMISSION_MODE_CONFIG_ID = "permissions";
+
+const SESSION_MODES = [
+  {
+    id: "standard",
+    name: "Ask before edits",
+    description: "Request permission for file edits and shell commands",
+  },
+  {
+    id: "acceptEdits",
+    name: "Accept edits",
+    description: "Auto-allow file edits; still ask for shell commands",
+  },
+  {
+    id: "unrestricted",
+    name: "Bypass permissions",
+    description: "Auto-allow all tool calls without asking",
+  },
+] as const;
 
 /**
  * Session bookkeeping does not read files, edit the workspace, or execute
@@ -44,23 +67,30 @@ export function isSessionModeId(value: string): value is PermissionMode {
 export function sessionModeState(currentModeId: PermissionMode): SessionModeState {
   return {
     currentModeId,
-    availableModes: [
-      {
-        id: "standard",
-        name: "Ask before edits",
-        description: "Request permission for file edits and shell commands",
-      },
-      {
-        id: "acceptEdits",
-        name: "Accept edits",
-        description: "Auto-allow file edits; still ask for shell commands",
-      },
-      {
-        id: "unrestricted",
-        name: "Bypass permissions",
-        description: "Auto-allow all tool calls without asking",
-      },
-    ],
+    availableModes: SESSION_MODES.map((mode) => ({ ...mode })),
+  };
+}
+
+/**
+ * Modern ACP clients render session modes from category=mode config options.
+ * Keep the legacy `modes` response too for clients that still use
+ * `session/set_mode`.
+ */
+export function permissionModeConfigOption(
+  currentModeId: PermissionMode,
+): SessionConfigOption {
+  return {
+    id: PERMISSION_MODE_CONFIG_ID,
+    name: "Permissions",
+    description: "Approval behavior for tool calls",
+    category: "mode",
+    type: "select",
+    currentValue: currentModeId,
+    options: SESSION_MODES.map((mode) => ({
+      value: mode.id,
+      name: mode.name,
+      description: mode.description,
+    })),
   };
 }
 
