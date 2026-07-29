@@ -23,6 +23,7 @@ interface ServerSocket {
 class FakeAppServer {
   readonly runtimeStartRequestIds: string[] = [];
   readonly createdAgentBodies: WireMessage[] = [];
+  readonly createdAgentPinGlobals: unknown[] = [];
   readonly approvalResponses: WireMessage[] = [];
   readonly conversationRetrieveIds: string[] = [];
   closedSockets = 0;
@@ -142,7 +143,7 @@ class FakeAppServer {
         const requestId = requiredString(message.request_id, "runtime_start.request_id");
         const conversationId = `conv-test-${++this.nextConversation}`;
         const createAgent = message.create_agent as
-          | { body?: WireMessage }
+          | { body?: WireMessage; pin_global?: boolean }
           | undefined;
         const agentId =
           typeof message.agent_id === "string"
@@ -155,7 +156,10 @@ class FakeAppServer {
           conversation_id: conversationId,
         };
         this.runtimeStartRequestIds.push(requestId);
-        if (createAgent?.body) this.createdAgentBodies.push(createAgent.body);
+        if (createAgent?.body) {
+          this.createdAgentBodies.push(createAgent.body);
+          this.createdAgentPinGlobals.push(createAgent.pin_global);
+        }
         socket.push({
           type: "runtime_start_response",
           request_id: requestId,
@@ -245,8 +249,17 @@ class FakeAppServer {
       case "update_model": {
         const payload = message.payload as WireMessage;
         this.updatedModelPayloads.push(payload);
-        const modelId = requiredString(payload.model_id, "update_model.model_id");
-        const handle = modelId === "other-model" ? "test/other-model" : "test/model";
+        const modelHandle =
+          typeof payload.model_handle === "string" ? payload.model_handle : undefined;
+        const modelId =
+          typeof payload.model_id === "string"
+            ? payload.model_id
+            : modelHandle
+              ? modelHandle.split("/").at(-1) ?? modelHandle
+              : requiredString(payload.model_id, "update_model.model_id");
+        const handle =
+          modelHandle ??
+          (modelId === "other-model" ? "test/other-model" : "test/model");
         socket.push({
           type: "update_model_response",
           request_id: requiredString(message.request_id, "update_model.request_id"),
@@ -576,6 +589,7 @@ function createAgent(
   server: FakeAppServer,
   overrides: {
     agentId?: string;
+    model?: string;
     sessionRegistryDir?: string | null;
     sessionRegistryScope?: string;
     outOfTurnPermissionTimeoutMs?: number;
@@ -589,6 +603,7 @@ function createAgent(
         url: "ws://fake-app-server.test/ws",
         WebSocket: server.socketConstructor(),
         requestTimeoutMs: 1_000,
+        pinGlobalAgent: false,
       },
     },
     agentId: "agent-test",
@@ -643,9 +658,12 @@ async function openSession(
 }
 
 describe("Agent SDK app-server integration", () => {
-  test("preserves the memo personality when creating an ACP agent", async () => {
+  test("creates a named, unpinned ACP agent with the configured model", async () => {
     const server = new FakeAppServer();
-    const agent = createAgent(server, { agentId: undefined });
+    const agent = createAgent(server, {
+      agentId: undefined,
+      model: "letta/auto",
+    });
     const { context } = createContext();
 
     try {
@@ -654,13 +672,49 @@ describe("Agent SDK app-server integration", () => {
       expect(session.sessionId).toBe("conv-test-2");
       expect(server.createdAgentBodies).toHaveLength(1);
       expect(server.createdAgentBodies[0]).toMatchObject({
-        name: "ACP agent",
-        description: "Letta agent driven by an ACP client (e.g. Zed)",
+        name: "Letta",
+        description: "Letta agent driven through the Agent Client Protocol",
+        model: "letta/auto",
         memory_blocks: expect.arrayContaining([
           expect.objectContaining({ label: "persona" }),
           expect.objectContaining({ label: "human" }),
         ]),
       });
+      expect(server.createdAgentBodies[0]).not.toHaveProperty("hidden", true);
+      expect(server.createdAgentPinGlobals).toEqual([false]);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("uses an explicit model when creating an agent", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server, {
+      agentId: undefined,
+      model: "anthropic/claude-sonnet-4",
+    });
+    const { context } = createContext();
+
+    try {
+      await openSession(agent, context);
+      expect(server.createdAgentBodies[0]).toMatchObject({
+        model: "anthropic/claude-sonnet-4",
+      });
+      expect(server.createdAgentPinGlobals).toEqual([false]);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("reuses an explicit agent without creating or pinning another", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server, { agentId: "agent-existing" });
+    const { context } = createContext();
+
+    try {
+      await openSession(agent, context);
+      expect(server.createdAgentBodies).toEqual([]);
+      expect(server.createdAgentPinGlobals).toEqual([]);
     } finally {
       agent.shutdown();
     }

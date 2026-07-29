@@ -1201,8 +1201,8 @@ export class LettaAcpAgent {
       // SDK 0.5 made personality presets opt-in. Keep the adapter's established
       // behavior instead of silently creating a zero-memory generic agent.
       personality: "memo",
-      name: "ACP agent",
-      description: "Letta agent driven by an ACP client (e.g. Zed)",
+      name: "Letta",
+      description: "Letta agent driven through the Agent Client Protocol",
       model: this.config.model,
     });
     log(

@@ -42,9 +42,10 @@ which authenticates to a dedicated Letta Cloud agent and creates a real session
 through acpx without spending model tokens. Locally, that command requires
 `LETTA_API_KEY` and `LETTA_ACP_TEST_AGENT_ID`.
 
-The first session creates a Letta agent and logs its id to stderr; set
-`LETTA_AGENT_ID` to that value to keep using the same agent (that's the point —
-its memory persists across sessions and editors).
+Without `LETTA_AGENT_ID`, the first session creates a visible, globally
+unpinned agent named **Letta** using `letta/auto`, then logs its id to stderr.
+Set `LETTA_AGENT_ID` to that value when future adapter processes should reuse
+the same persistent memory.
 
 ## Use from Zed
 
@@ -145,9 +146,9 @@ available (it ships as a dependency of this package) and model access: either
 ```
 
 Both entries are optional: `local` is the default backend, and without
-`LETTA_AGENT_ID` the adapter creates an agent on first use and logs its id to
-stderr. Setting them explicitly is still recommended — the pin keeps every
-session on the same persistent agent.
+`LETTA_AGENT_ID` the adapter creates a visible, globally unpinned **Letta** agent
+on first use and logs its id to stderr. Set the logged id explicitly when later
+adapter processes should return to that agent's persistent memory.
 
 ### Self-hosted app server (`remote`)
 
@@ -169,8 +170,8 @@ non-loopback deployments enable auth
 
 | Variable | Effect |
 |----------|--------|
-| `LETTA_AGENT_ID` | reuse an existing agent instead of creating one |
-| `LETTA_ACP_MODEL` | model override for sessions, as a `provider/model` handle (e.g. `anthropic/claude-fable-5`, `openai/gpt-4.1`) — run `/model` in a thread to list valid handles |
+| `LETTA_AGENT_ID` | reuse an existing agent instead of creating a visible, globally unpinned agent named `Letta` |
+| `LETTA_ACP_MODEL` | model for new agents and sessions (default `letta/auto`), as a `provider/model` handle (e.g. `anthropic/claude-fable-5`, `openai/gpt-4.1`) — run `/model` in a thread to list valid handles |
 | `LETTA_ACP_PERMISSION_MODE` | initial session mode: `standard` (default), `acceptEdits`, `unrestricted` — switchable live via `session/set_mode` (Zed's mode dropdown) |
 
 Note on tool execution: with `remote` and `cloud`, built-in tools (Read, Bash,

@@ -85,6 +85,20 @@ function startFakeAppServer() {
               available_handles: ["test/model"],
             }));
             return;
+          case "update_model": {
+            const payload = message.payload as WireMessage;
+            const modelHandle = requiredString(payload.model_handle);
+            socket.send(JSON.stringify({
+              type: "update_model_response",
+              request_id: requiredString(message.request_id),
+              success: true,
+              runtime: message.runtime,
+              applied_to: "conversation",
+              model_id: modelHandle.split("/").at(-1) ?? modelHandle,
+              model_handle: modelHandle,
+            }));
+            return;
+          }
           case "input": {
             const payload = message.payload as WireMessage;
             if (payload.kind !== "create_message") return;

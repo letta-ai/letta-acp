@@ -37,6 +37,7 @@ const PERMISSION_MODES: PermissionMode[] = [
 ];
 
 const BACKENDS = ["local", "remote", "cloud", "cloud-oauth"] as const;
+export const DEFAULT_ACP_MODEL = "letta/auto";
 
 export function configFromEnv(
   env: Record<string, string | undefined> = process.env,
@@ -47,7 +48,10 @@ export function configFromEnv(
   let sessionRegistryScope = backend;
   switch (backend) {
     case "local":
-      clientOptions = { backend: "local" };
+      clientOptions = {
+        backend: "local",
+        appServer: { pinGlobalAgent: false },
+      };
       break;
     case "remote": {
       const url = env.LETTA_APP_SERVER_URL ?? "ws://127.0.0.1:4500";
@@ -55,6 +59,7 @@ export function configFromEnv(
         backend: "remote",
         url,
         authToken: env.LETTA_APP_SERVER_TOKEN,
+        pinGlobalAgent: false,
       };
       sessionRegistryScope = `remote:${url}`;
       break;
@@ -80,7 +85,10 @@ export function configFromEnv(
       // execute on this machine.
       clientOptions = {
         backend: "local",
-        appServer: { harnessBackend: "api" },
+        appServer: {
+          harnessBackend: "api",
+          pinGlobalAgent: false,
+        },
       };
       break;
     default:
@@ -99,7 +107,7 @@ export function configFromEnv(
   return {
     clientOptions,
     agentId: env.LETTA_AGENT_ID,
-    model: env.LETTA_ACP_MODEL,
+    model: env.LETTA_ACP_MODEL ?? DEFAULT_ACP_MODEL,
     permissionMode: permissionMode as PermissionMode,
     sessionRegistryDir:
       env.LETTA_ACP_STATE_DIR ?? join(homedir(), ".letta", "letta-acp", "sessions"),
