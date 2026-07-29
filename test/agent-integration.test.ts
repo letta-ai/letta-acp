@@ -958,6 +958,40 @@ describe("Agent SDK app-server integration", () => {
     }
   });
 
+  test("auto-allows task bookkeeping in ask-before-edits mode", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, permissionRequests } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "plain prompt" }],
+        },
+        context,
+      );
+      const approval = server.nextApprovalResponse();
+      server.requestPermissionAfterPrompt({
+        requestId: "task-update-request",
+        toolName: "TaskUpdate",
+        toolCallId: "call-task-update",
+        input: { taskId: "task_1", status: "completed" },
+      });
+
+      expect(await approval).toEqual(
+        expect.objectContaining({
+          request_id: "task-update-request",
+          decision: expect.objectContaining({ behavior: "allow" }),
+        }),
+      );
+      expect(permissionRequests).toEqual([]);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
   test("attaches a permission request to the tool call it belongs to", async () => {
     const server = new FakeAppServer();
     const agent = createAgent(server);

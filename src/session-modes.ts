@@ -15,6 +15,19 @@ export const SESSION_MODE_IDS: PermissionMode[] = [
   "unrestricted",
 ];
 
+/**
+ * Session bookkeeping does not read files, edit the workspace, or execute
+ * commands. Match the Letta harness, which marks these tools as not requiring
+ * approval, so progress tracking never interrupts an otherwise safe turn.
+ */
+const BOOKKEEPING_TOOLS = new Set([
+  "TaskCreate",
+  "TaskGet",
+  "TaskList",
+  "TaskUpdate",
+  "TodoWrite",
+]);
+
 /** Tools auto-allowed in acceptEdits mode. */
 const EDIT_TOOLS = new Set([
   "Edit",
@@ -54,6 +67,7 @@ export function sessionModeState(currentModeId: PermissionMode): SessionModeStat
 /** Whether the adapter should auto-allow this tool under the given mode. */
 export function modeAutoAllows(mode: PermissionMode, toolName: string): boolean {
   if (mode === "unrestricted") return true;
+  if (BOOKKEEPING_TOOLS.has(toolName)) return true;
   if (mode === "acceptEdits") return EDIT_TOOLS.has(toolName);
   return false;
 }
