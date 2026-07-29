@@ -3,7 +3,7 @@ import type {
   SessionModeState,
 } from "@agentclientprotocol/sdk";
 import type { PermissionMode } from "@letta-ai/letta-agent-sdk";
-import { realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -167,6 +167,23 @@ async function canonicalBoundaryPath(path: string): Promise<string> {
       ) {
         throw error;
       }
+      // `realpath` also reports ENOENT for a dangling symlink. Do not treat
+      // that as a new in-workspace buffer: its eventual target is unconstrained.
+      let cursorIsMissing = false;
+      try {
+        await lstat(cursor);
+      } catch (statError) {
+        if (
+          statError &&
+          typeof statError === "object" &&
+          (statError as NodeJS.ErrnoException).code === "ENOENT"
+        ) {
+          cursorIsMissing = true;
+        } else {
+          throw statError;
+        }
+      }
+      if (!cursorIsMissing) throw error;
       const parent = dirname(cursor);
       if (parent === cursor) throw new Error(`Cannot resolve ${path}`);
       missingSegments.unshift(basename(cursor));

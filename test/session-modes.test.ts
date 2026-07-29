@@ -112,6 +112,10 @@ describe("editor read workspace boundary", () => {
     await writeFile(outside, "secret\n");
     await symlink(outside, join(workspace, "linked-secret.ts"));
     await symlink(sibling, join(workspace, "linked-directory"));
+    await symlink(
+      join(sibling, "missing-target.ts"),
+      join(workspace, "dangling-secret.ts"),
+    );
 
     for (const mode of ["standard", "acceptEdits"] as const) {
       for (const path of [
@@ -119,6 +123,7 @@ describe("editor read workspace boundary", () => {
         join(workspace, "..", "repo-private", "secret.ts"),
         join(workspace, "linked-secret.ts"),
         join(workspace, "linked-directory", "missing.ts"),
+        join(workspace, "dangling-secret.ts"),
       ]) {
         expect(
           await editorReadAutoAllows(
