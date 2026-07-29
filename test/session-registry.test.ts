@@ -51,6 +51,18 @@ describe("SessionRegistry", () => {
     ).toEqual([]);
   });
 
+  test("observes records removed by another adapter process", async () => {
+    const directory = await temporaryDirectory();
+    const first = new SessionRegistry(directory, "cloud");
+    const second = new SessionRegistry(directory, "cloud");
+    await first.record("agent-1", "conv-one", "/workspace");
+    expect(await second.list("agent-1", "/workspace")).toHaveLength(1);
+
+    await first.remove("conv-one");
+
+    expect(await second.list("agent-1", "/workspace")).toEqual([]);
+  });
+
   test("moves a conversation when it is loaded from a different cwd", async () => {
     const directory = await temporaryDirectory();
     const registry = new SessionRegistry(directory, "cloud");

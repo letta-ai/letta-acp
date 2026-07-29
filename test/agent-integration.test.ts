@@ -174,10 +174,24 @@ class FakeAppServer {
           memory_directory: "/tmp/letta-acp-memory",
         });
         return;
-      case "conversation_retrieve":
-        this.conversationRetrieveIds.push(
-          requiredString(message.conversation_id, "conversation_retrieve.conversation_id"),
+      case "conversation_retrieve": {
+        const conversationId = requiredString(
+          message.conversation_id,
+          "conversation_retrieve.conversation_id",
         );
+        this.conversationRetrieveIds.push(conversationId);
+        if (conversationId.includes("missing")) {
+          socket.push({
+            type: "conversation_retrieve_response",
+            request_id: requiredString(
+              message.request_id,
+              "conversation_retrieve.request_id",
+            ),
+            success: false,
+            error: "conversation unavailable",
+          });
+          return;
+        }
         socket.push({
           type: "conversation_retrieve_response",
           request_id: requiredString(
@@ -186,11 +200,13 @@ class FakeAppServer {
           ),
           success: true,
           conversation: {
-            id: message.conversation_id,
-            agent_id: "agent-test",
+            id: conversationId,
+            agent_id: conversationId.includes("foreign") ? "agent-other" : "agent-test",
+            archived: conversationId.includes("archived"),
           },
         });
         return;
+      }
       case "conversation_messages_list":
         socket.push({
           type: "conversation_messages_list_response",
@@ -691,6 +707,35 @@ describe("Agent SDK app-server integration", () => {
       expect(second.sessions).toHaveLength(1);
       expect(second.nextCursor).toBeUndefined();
       expect(server.conversationRetrieveIds).toHaveLength(51);
+    } finally {
+      agent.shutdown();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("removes archived and foreign sessions but retains unavailable records", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "letta-acp-list-stale-"));
+    const scope = "stale-test";
+    const registry = new SessionRegistry(directory, scope);
+    const cwd = "/tmp/letta-acp-test";
+    await registry.record("agent-test", "conv-visible", cwd);
+    await registry.record("agent-test", "conv-archived", cwd);
+    await registry.record("agent-test", "conv-foreign", cwd);
+    await registry.record("agent-test", "conv-missing", cwd);
+
+    const server = new FakeAppServer();
+    const agent = createAgent(server, {
+      sessionRegistryDir: directory,
+      sessionRegistryScope: scope,
+    });
+    try {
+      const result = await agent.listSessions({ cwd });
+      expect(result.sessions.map((session) => session.sessionId)).toEqual([
+        "conv-visible",
+      ]);
+      expect(
+        (await registry.list("agent-test", cwd)).map((record) => record.sessionId).sort(),
+      ).toEqual(["conv-missing", "conv-visible"]);
     } finally {
       agent.shutdown();
       await rm(directory, { recursive: true, force: true });
