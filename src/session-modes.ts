@@ -3,6 +3,15 @@ import type {
   SessionModeState,
 } from "@agentclientprotocol/sdk";
 import type { PermissionMode } from "@letta-ai/letta-agent-sdk";
+import { lstat, realpath } from "node:fs/promises";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 
 /**
  * ACP session modes exposed to clients (Zed renders these as a dropdown).
@@ -24,12 +33,14 @@ const SESSION_MODES = [
   {
     id: "standard",
     name: "Ask before edits",
-    description: "Request permission for file edits and shell commands",
+    description:
+      "Allow workspace reads; ask before edits, shell commands, and outside-workspace reads",
   },
   {
     id: "acceptEdits",
     name: "Accept edits",
-    description: "Auto-allow file edits; still ask for shell commands",
+    description:
+      "Allow workspace reads and file edits; ask before shell commands and outside-workspace reads",
   },
   {
     id: "unrestricted",
@@ -100,4 +111,83 @@ export function modeAutoAllows(mode: PermissionMode, toolName: string): boolean 
   if (BOOKKEEPING_TOOLS.has(toolName)) return true;
   if (mode === "acceptEdits") return EDIT_TOOLS.has(toolName);
   return false;
+}
+
+/**
+ * Editor reads match the harness's read-only tool behavior only inside the
+ * active workspace. Canonicalize both paths before comparing so `..`, sibling
+ * prefixes, and symlinks cannot turn an apparently local read into an
+ * automatic approval. New unsaved files inherit their nearest existing
+ * ancestor; malformed or otherwise unresolvable targets stay controlled.
+ */
+export async function editorReadAutoAllows(
+  mode: PermissionMode,
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  cwd: string,
+): Promise<boolean> {
+  if (toolName !== "read_editor_buffer") return false;
+  if (mode === "unrestricted") return true;
+
+  const requestedPath = toolInput.path;
+  if (typeof requestedPath !== "string" || !isAbsolute(requestedPath)) {
+    return false;
+  }
+
+  try {
+    const [workspace, target] = await Promise.all([
+      realpath(resolve(cwd)),
+      canonicalBoundaryPath(requestedPath),
+    ]);
+    const fromWorkspace = relative(workspace, target);
+    return (
+      fromWorkspace === "" ||
+      (fromWorkspace !== ".." &&
+        !fromWorkspace.startsWith(`..${sep}`) &&
+        !isAbsolute(fromWorkspace))
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Resolve symlinks while still supporting a new unsaved editor buffer. */
+async function canonicalBoundaryPath(path: string): Promise<string> {
+  let cursor = resolve(path);
+  const missingSegments: string[] = [];
+  while (true) {
+    try {
+      const existing = await realpath(cursor);
+      return resolve(existing, ...missingSegments);
+    } catch (error) {
+      if (
+        !error ||
+        typeof error !== "object" ||
+        (error as NodeJS.ErrnoException).code !== "ENOENT"
+      ) {
+        throw error;
+      }
+      // `realpath` also reports ENOENT for a dangling symlink. Do not treat
+      // that as a new in-workspace buffer: its eventual target is unconstrained.
+      let cursorIsMissing = false;
+      try {
+        await lstat(cursor);
+      } catch (statError) {
+        if (
+          statError &&
+          typeof statError === "object" &&
+          (statError as NodeJS.ErrnoException).code === "ENOENT"
+        ) {
+          cursorIsMissing = true;
+        } else {
+          throw statError;
+        }
+      }
+      if (!cursorIsMissing) throw error;
+      const parent = dirname(cursor);
+      if (parent === cursor) throw new Error(`Cannot resolve ${path}`);
+      missingSegments.unshift(basename(cursor));
+      cursor = parent;
+    }
+  }
 }
