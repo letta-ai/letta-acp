@@ -204,10 +204,11 @@ adapter restarts with no local state: the conversation is resumed via the SDK
 and its recent history (up to 200 messages) is replayed as `session/update`
 notifications. Session modes are enforced in the adapter's permission
 callback — the harness always runs in `standard` mode so every approval routes
-through the adapter, which is what makes live mode switching possible;
-`acceptEdits` auto-allows file-edit tools, `unrestricted` auto-allows
-everything. `/model` (empty to list, or a handle to switch) is handled in the
-adapter without an LLM turn.
+through the adapter, which is what makes live mode switching possible. Session
+bookkeeping tools (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`, and
+`TodoWrite`) never require approval; `acceptEdits` additionally auto-allows
+file-edit tools, and `unrestricted` auto-allows everything. `/model` (empty to
+list, or a handle to switch) is handled in the adapter without an LLM turn.
 
 ### Slash commands
 
