@@ -6,6 +6,7 @@ import {
   type InitializeResponse,
   type LoadSessionRequest,
   type LoadSessionResponse,
+  type McpServer,
   methods,
   type NewSessionRequest,
   type NewSessionResponse,
@@ -22,6 +23,7 @@ import {
   type CanUseToolResponse,
   LettaAgentClient,
   type LettaCodeSession,
+  type McpServerConfig,
   type MessageContentItem,
   type PermissionMode,
   type SDKMessage,
@@ -186,6 +188,7 @@ export class LettaAcpAgent {
       resumeId: null,
       agentId,
       clientContext: cx,
+      mcpServers: params.mcpServers,
     });
     log(`session ${sessionId} -> agent ${agentId} (cwd: ${params.cwd})`);
     this.announceCommands(sessionId, cx);
@@ -209,6 +212,7 @@ export class LettaAcpAgent {
       resumeId: params.sessionId,
       agentId: null,
       clientContext: cx,
+      mcpServers: params.mcpServers,
     });
     const history = await state.session.listMessages({
       order: "desc",
@@ -268,6 +272,7 @@ export class LettaAcpAgent {
     resumeId: string | null;
     agentId: string | null;
     clientContext: AgentContext;
+    mcpServers?: readonly McpServer[];
   }): Promise<{ sessionId: string; state: AcpSessionState }> {
     const ref = { sessionId: options.resumeId ?? "" };
     const editorTools = createEditorTools(this.clientFsCaps, {
@@ -275,6 +280,7 @@ export class LettaAcpAgent {
       getClientContext: () =>
         this.sessions.get(ref.sessionId)?.clientContext ?? null,
     });
+    const mcpServers = toSdkMcpServers(options.mcpServers);
     const sessionOptions = {
       cwd: options.cwd,
       model: this.config.model,
@@ -291,6 +297,7 @@ export class LettaAcpAgent {
           context,
         ),
       ...(editorTools.length > 0 ? { tools: editorTools } : {}),
+      ...(mcpServers.length > 0 ? { mcpServers } : {}),
     };
     const session = options.resumeId
       ? this.client.resumeSession(options.resumeId, sessionOptions)
@@ -982,6 +989,53 @@ async function raceDeadline<T>(
 function knownToolName(toolName: string): string | undefined {
   if (!toolName || toolName === "?") return undefined;
   return toolName;
+}
+
+/**
+ * Convert ACP's MCP server union to the stdio configuration owned by the Agent
+ * SDK. HTTP and SSE require capabilities this adapter does not advertise yet.
+ */
+function toSdkMcpServers(
+  servers: readonly McpServer[] | undefined,
+): McpServerConfig[] {
+  const configs: McpServerConfig[] = [];
+  for (const server of servers ?? []) {
+    const type = (server as { type?: string }).type;
+    if (type !== undefined && type !== "stdio") {
+      log(
+        `MCP server "${server.name}" skipped: only stdio transport is supported`,
+      );
+      continue;
+    }
+
+    const stdio = server as {
+      name: string;
+      command?: unknown;
+      args?: unknown;
+      env?: unknown;
+    };
+    if (typeof stdio.command !== "string" || stdio.command.length === 0) {
+      log(`MCP server "${server.name}" skipped: missing stdio command`);
+      continue;
+    }
+    const args = Array.isArray(stdio.args)
+      ? stdio.args.filter((arg): arg is string => typeof arg === "string")
+      : [];
+    const env = Array.isArray(stdio.env)
+      ? stdio.env.flatMap((entry) => {
+          if (!entry || typeof entry !== "object") return [];
+          const { name, value } = entry as {
+            name?: unknown;
+            value?: unknown;
+          };
+          return typeof name === "string" && typeof value === "string"
+            ? [{ name, value }]
+            : [];
+        })
+      : [];
+    configs.push({ name: stdio.name, command: stdio.command, args, env });
+  }
+  return configs;
 }
 
 /** ACP prompt content blocks -> Letta multimodal message content. */

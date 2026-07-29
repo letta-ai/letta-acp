@@ -20,6 +20,7 @@ class FakeAppServer {
   readonly runtimeStartRequestIds: string[] = [];
   readonly createdAgentBodies: WireMessage[] = [];
   readonly approvalResponses: WireMessage[] = [];
+  readonly externalToolGroups: unknown[] = [];
   private nextConversation = 0;
   private activeControlSocket: ServerSocket | null = null;
   private activeRuntime: RuntimeScope | null = null;
@@ -148,6 +149,9 @@ class FakeAppServer {
         };
         this.runtimeStartRequestIds.push(requestId);
         if (createAgent?.body) this.createdAgentBodies.push(createAgent.body);
+        if (message.external_tools !== undefined) {
+          this.externalToolGroups.push(message.external_tools);
+        }
         socket.push({
           type: "runtime_start_response",
           request_id: requestId,
@@ -546,10 +550,18 @@ function createContext(
   return { context, updates, permissionRequests, permissionSignals };
 }
 
-async function openSession(agent: LettaAcpAgent, context: AgentContext) {
+async function openSession(
+  agent: LettaAcpAgent,
+  context: AgentContext,
+  params: Record<string, unknown> = {},
+) {
   await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
   return agent.newSession(
-    { cwd: "/tmp/letta-acp-test", mcpServers: [] },
+    {
+      cwd: "/tmp/letta-acp-test",
+      mcpServers: [],
+      ...params,
+    } as Parameters<LettaAcpAgent["newSession"]>[0],
     context,
   );
 }
@@ -573,6 +585,39 @@ describe("Agent SDK app-server integration", () => {
           expect.objectContaining({ label: "human" }),
         ]),
       });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("forwards client stdio MCP servers through the Agent SDK", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context } = createContext();
+
+    try {
+      await openSession(agent, context, {
+        cwd: process.cwd(),
+        mcpServers: [
+          {
+            name: "fixture",
+            command: process.execPath,
+            args: [
+              new URL(
+                "./dist/index.js",
+                import.meta.resolve(
+                  "@modelcontextprotocol/server-everything/package.json",
+                ),
+              ).pathname,
+            ],
+            env: [],
+          },
+        ],
+      });
+
+      expect(JSON.stringify(server.externalToolGroups)).toContain(
+        "mcp__fixture__echo",
+      );
     } finally {
       agent.shutdown();
     }
