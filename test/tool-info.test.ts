@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   accumulateToolInput,
+  boundedToolOutput,
   parseToolOutput,
   toolDiffContent,
   toolLocations,
@@ -26,9 +27,7 @@ describe("fragmented tool arguments", () => {
       command: "git status",
       description: "Show working tree status",
     });
-    expect(toolTitle("Bash", complete.input)).toBe(
-      "Bash: Show working tree status",
-    );
+    expect(toolTitle("Bash", complete.input)).toBe("git status");
     expect(complete.complete).toBe(true);
   });
 
@@ -86,6 +85,23 @@ describe("fragmented tool arguments", () => {
     );
     expect(complete.input).toEqual(input);
     expect(toolLocations(complete.input)).toEqual([{ path: "/tmp/example.ts" }]);
+  });
+});
+
+describe("tool output fallback", () => {
+  test("preserves short output", () => {
+    expect(boundedToolOutput("hello")).toBe("hello");
+  });
+
+  test("bounds long output while preserving its head, tail, and UTF-8", () => {
+    const output = `${"a".repeat(12_000)}🙂${"z".repeat(12_000)}`;
+    const bounded = boundedToolOutput(output);
+
+    expect(Buffer.byteLength(bounded)).toBeLessThanOrEqual(16 * 1024);
+    expect(bounded.startsWith("aaaa")).toBe(true);
+    expect(bounded.endsWith("zzzz")).toBe(true);
+    expect(bounded).toContain("output truncated for display");
+    expect(bounded).not.toContain("�");
   });
 });
 

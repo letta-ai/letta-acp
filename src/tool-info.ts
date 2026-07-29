@@ -128,6 +128,44 @@ export function toolDiffContent(
   return [];
 }
 
+const TOOL_OUTPUT_FALLBACK_BYTES = 16 * 1024;
+
+export function isTerminalOutputTool(toolName: string): boolean {
+  return toolName.toLowerCase() === "bash";
+}
+
+/**
+ * Keep generic clients responsive without changing the full rawOutput payload.
+ * Native-terminal clients receive the complete output through terminal metadata.
+ */
+export function boundedToolOutput(content: string): string {
+  const encoded = Buffer.from(content);
+  if (encoded.byteLength <= TOOL_OUTPUT_FALLBACK_BYTES) return content;
+
+  const marker = "\n\n… output truncated for display …\n\n";
+  const markerBytes = Buffer.byteLength(marker);
+  const remaining = TOOL_OUTPUT_FALLBACK_BYTES - markerBytes;
+  const headBytes = Math.floor(remaining / 2);
+  const tailBytes = remaining - headBytes;
+  return `${decodeUtf8Boundary(encoded.subarray(0, headBytes), "head")}${marker}${decodeUtf8Boundary(
+    encoded.subarray(encoded.byteLength - tailBytes),
+    "tail",
+  )}`;
+}
+
+function decodeUtf8Boundary(bytes: Buffer, side: "head" | "tail"): string {
+  for (let offset = 0; offset < Math.min(4, bytes.byteLength); offset += 1) {
+    const candidate =
+      side === "head" ? bytes.subarray(0, bytes.byteLength - offset) : bytes.subarray(offset);
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(candidate);
+    } catch {
+      // The byte slice may start or end inside a multibyte codepoint.
+    }
+  }
+  return "";
+}
+
 /** Parse tool output for ACP rawOutput while preserving non-JSON text. */
 export function parseToolOutput(content: string): unknown {
   try {
@@ -142,6 +180,12 @@ export function toolTitle(
   toolName: string,
   toolInput: Record<string, unknown>,
 ): string {
+  if (isTerminalOutputTool(toolName)) {
+    const command = firstString(toolInput, ["command"]);
+    // Keep the executable command intact: shortening or replacing it with a
+    // friendly description can hide the operation a user is approving.
+    return command ?? toolName;
+  }
   const detail =
     firstString(toolInput, [
       "file_path",
