@@ -43,6 +43,9 @@ const connection = await acp
   .onRequest(acp.methods.agent.session.load, (ctx) =>
     agent.loadSession(ctx.params, ctx.client),
   )
+  .onRequest(acp.methods.agent.session.list, (ctx) =>
+    agent.listSessions(ctx.params),
+  )
   .onRequest(acp.methods.agent.session.setMode, (ctx) =>
     agent.setSessionMode(ctx.params, ctx.client),
   )

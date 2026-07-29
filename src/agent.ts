@@ -6,6 +6,8 @@ import {
   type InitializeResponse,
   type LoadSessionRequest,
   type LoadSessionResponse,
+  type ListSessionsRequest,
+  type ListSessionsResponse,
   type McpServer,
   methods,
   type NewSessionRequest,
@@ -26,6 +28,7 @@ import {
   type CanUseToolResponse,
   LettaAgentClient,
   type LettaCodeSession,
+  type LettaConversation,
   type McpServerConfig,
   type MessageContentItem,
   type PermissionMode,
@@ -40,6 +43,7 @@ import {
 } from "./editor-tools.js";
 import { historyToUpdates } from "./history-replay.js";
 import { withAcpRequestTimeout } from "./request-timeout.js";
+import { SessionRegistry } from "./session-registry.js";
 import {
   isSessionModeId,
   modeAutoAllows,
@@ -94,6 +98,8 @@ interface AcpSessionState {
 
 /** Max history messages replayed on session/load. */
 const LOAD_HISTORY_LIMIT = 200;
+/** Number of project sessions returned in one session/list page. */
+const SESSION_LIST_PAGE_SIZE = 50;
 
 /**
  * Liveness bound for permission requests raised outside a prompt turn.
@@ -142,6 +148,7 @@ export class LettaAcpAgent {
   private readonly client: LettaAgentClient;
   private readonly outOfTurnPermissionTimeoutMs: number;
   private readonly prematureResultGraceMs: number;
+  private readonly sessionRegistry: SessionRegistry;
   private readonly sessions = new Map<string, AcpSessionState>();
   private agentIdPromise: Promise<string> | null = null;
   private supportsTerminalOutput = false;
@@ -153,6 +160,10 @@ export class LettaAcpAgent {
   constructor(config: LettaAcpConfig) {
     this.config = config;
     this.client = new LettaAgentClient(config.clientOptions);
+    this.sessionRegistry = new SessionRegistry(
+      config.sessionRegistryDir ?? null,
+      config.sessionRegistryScope ?? config.clientOptions.backend ?? "local",
+    );
     this.outOfTurnPermissionTimeoutMs =
       config.outOfTurnPermissionTimeoutMs ??
       DEFAULT_OUT_OF_TURN_PERMISSION_TIMEOUT_MS;
@@ -177,6 +188,7 @@ export class LettaAcpAgent {
       protocolVersion,
       agentCapabilities: {
         loadSession: true,
+        sessionCapabilities: { list: {} },
         promptCapabilities: {
           image: true,
           embeddedContext: true,
@@ -201,6 +213,7 @@ export class LettaAcpAgent {
       clientContext: cx,
       mcpServers: params.mcpServers,
     });
+    await this.rememberSession(agentId, sessionId, params.cwd);
     log(`session ${sessionId} -> agent ${agentId} (cwd: ${params.cwd})`);
     this.announceCommands(sessionId, cx);
     return {
@@ -229,6 +242,7 @@ export class LettaAcpAgent {
       clientContext: cx,
       mcpServers: params.mcpServers,
     });
+    await this.rememberSession(state.session.agentId, sessionId, params.cwd);
     const history = await state.session.listMessages({
       order: "desc",
       limit: LOAD_HISTORY_LIMIT,
@@ -251,6 +265,83 @@ export class LettaAcpAgent {
       modes: sessionModeState(state.modeId),
       configOptions: await this.modelConfigOptions(state),
     };
+  }
+
+  async listSessions(params: ListSessionsRequest): Promise<ListSessionsResponse> {
+    const agentId = await this.ensureAgent();
+    const records = await this.sessionRegistry.list(agentId, params.cwd);
+    if (records.length === 0) return { sessions: [] };
+
+    let start = 0;
+    if (params.cursor) {
+      const previous = records.findIndex((record) => record.sessionId === params.cursor);
+      if (previous < 0) throw new Error("Invalid session/list cursor");
+      start = previous + 1;
+    }
+
+    // Bound each page by registry records rather than successful lookups. Stale
+    // or temporarily unavailable conversations must not turn one list request
+    // into an unbounded sequence of management calls.
+    const page = records.slice(start, start + SESSION_LIST_PAGE_SIZE);
+    const resolved = await Promise.all(
+      page.map(async (record) => {
+        let conversation: LettaConversation;
+        try {
+          conversation = await this.client.conversations.retrieve(record.sessionId);
+        } catch (error) {
+          // A deleted conversation is indistinguishable here from a transient
+          // management failure. Omit it for this response but retain the local
+          // record so an outage cannot erase discoverability permanently.
+          log(`cannot resolve listed session ${record.sessionId}: ${String(error)}`);
+          return null;
+        }
+        if (conversation.agent_id !== agentId || conversation.archived === true) {
+          await this.sessionRegistry.remove(record.sessionId);
+          return null;
+        }
+        const title = sessionTitle(conversation);
+        const updatedAt =
+          conversation.last_message_at ??
+          conversation.updated_at ??
+          conversation.created_at ??
+          record.recordedAt;
+        return {
+          sessionId: record.sessionId,
+          cwd: record.cwd,
+          ...(title ? { title } : {}),
+          ...(updatedAt ? { updatedAt } : {}),
+        };
+      }),
+    );
+    const sessions = resolved.filter(
+      (session): session is NonNullable<typeof session> => session !== null,
+    );
+    const last = page.at(-1);
+
+    return {
+      sessions,
+      ...(last && start + page.length < records.length
+        ? { nextCursor: last.sessionId }
+        : {}),
+    };
+  }
+
+  private async rememberSession(
+    agentId: string | null | undefined,
+    sessionId: string,
+    cwd: string,
+  ): Promise<void> {
+    if (!agentId) {
+      log(`cannot record session ${sessionId}: runtime did not report an agent id`);
+      return;
+    }
+    try {
+      await this.sessionRegistry.record(agentId, sessionId, cwd);
+    } catch (error) {
+      // Session creation/loading already succeeded. Do not turn a local metadata
+      // write failure into a retry that creates a duplicate conversation.
+      log(`failed to record session ${sessionId}: ${String(error)}`);
+    }
   }
 
   private async modelConfigOptions(
@@ -1102,6 +1193,14 @@ export class LettaAcpAgent {
     );
     return agentId;
   }
+}
+
+function sessionTitle(conversation: LettaConversation): string | undefined {
+  const source = conversation.summary ?? conversation.description;
+  if (!source) return undefined;
+  const title = source.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!title) return undefined;
+  return title.length <= 256 ? title : `${title.slice(0, 255)}…`;
 }
 
 /** Awaits `pending`, or resolves null when the deadline expires first. */

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SessionRegistry } from "../src/session-registry.js";
 
 interface RuntimeScope {
   agent_id: string;
@@ -52,6 +53,14 @@ function startFakeAppServer() {
             }));
             return;
           }
+          case "conversation_retrieve":
+            socket.send(JSON.stringify({
+              type: "conversation_retrieve_response",
+              request_id: requiredString(message.request_id),
+              success: true,
+              conversation: TEST_CONVERSATION,
+            }));
+            return;
           case "conversation_messages_list":
             socket.send(JSON.stringify({
               type: "conversation_messages_list_response",
@@ -120,6 +129,14 @@ const TEST_RUNTIME: RuntimeScope = {
   conversation_id: "conv-acpx-test",
 };
 
+const TEST_CONVERSATION = {
+  id: TEST_RUNTIME.conversation_id,
+  agent_id: TEST_RUNTIME.agent_id,
+  summary: "ACP client compatibility session",
+  archived: false,
+  updated_at: "2026-07-29T12:00:00.000Z",
+};
+
 function sendDelta(
   socket: { send(data: string): unknown },
   delta: WireMessage,
@@ -138,10 +155,23 @@ function requiredString(value: unknown): string {
   return value;
 }
 
-async function runAcpx(format: "json" | "quiet") {
+async function runAcpx(
+  format: "json" | "quiet",
+  command: string[] = ["exec", "Exercise the ACP tool lifecycle."],
+  seedSession = false,
+) {
   const home = mkdtempSync(join(tmpdir(), "letta-acp-acpx-"));
   tempDirs.push(home);
   const appServerUrl = startFakeAppServer();
+  const cwd = join(import.meta.dir, "..");
+  if (seedSession) {
+    const registry = new SessionRegistry(
+      join(home, ".letta", "letta-acp", "sessions"),
+      `remote:${appServerUrl}`,
+    );
+    await registry.record(TEST_RUNTIME.agent_id, TEST_RUNTIME.conversation_id, cwd);
+  }
+
   const acpxPath = join(import.meta.dir, "..", "node_modules", ".bin", "acpx");
   const agentPath = join(import.meta.dir, "..", "src", "index.ts");
   const child = Bun.spawn(
@@ -153,11 +183,10 @@ async function runAcpx(format: "json" | "quiet") {
       format,
       "--timeout",
       "5",
-      "exec",
-      "Exercise the ACP tool lifecycle.",
+      ...command,
     ],
     {
-      cwd: join(import.meta.dir, ".."),
+      cwd,
       env: {
         ...process.env,
         HOME: home,
@@ -178,7 +207,7 @@ async function runAcpx(format: "json" | "quiet") {
   if (exitCode !== 0) {
     throw new Error(`acpx exited ${exitCode}:\n${stderr}\n${stdout}`);
   }
-  return { stdout, stderr };
+  return { stdout, stderr, home, appServerUrl, cwd };
 }
 
 async function verifyMcpShutdownOnClientDisconnect(): Promise<void> {
@@ -285,6 +314,31 @@ describe("acpx client compatibility", () => {
   test("completes a prompt through a real ACP client", async () => {
     const { stdout } = await runAcpx("quiet");
     expect(stdout.trim()).toBe("ACPX_OK");
+  }, 10_000);
+
+  test("records a new ACP session for discovery", async () => {
+    const { home, appServerUrl, cwd } = await runAcpx("quiet");
+    const registry = new SessionRegistry(
+      join(home, ".letta", "letta-acp", "sessions"),
+      `remote:${appServerUrl}`,
+    );
+
+    expect(await registry.list(TEST_RUNTIME.agent_id, cwd)).toEqual([
+      expect.objectContaining({ sessionId: TEST_RUNTIME.conversation_id, cwd }),
+    ]);
+  }, 10_000);
+
+  test("lists project sessions through a real ACP client", async () => {
+    const cwd = join(import.meta.dir, "..");
+    const { stdout } = await runAcpx(
+      "json",
+      ["sessions", "list", "--filter-cwd", cwd],
+      true,
+    );
+
+    expect(stdout).toContain(TEST_RUNTIME.conversation_id);
+    expect(stdout).toContain("ACP client compatibility session");
+    expect(stdout).toContain(cwd);
   }, 10_000);
 
   test("waits for MCP subprocess cleanup after the client disconnects", async () => {
