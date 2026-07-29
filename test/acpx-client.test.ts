@@ -61,6 +61,21 @@ function startFakeAppServer() {
               has_more: false,
             }));
             return;
+          case "list_models":
+            socket.send(JSON.stringify({
+              type: "list_models_response",
+              request_id: requiredString(message.request_id),
+              success: true,
+              entries: [{
+                id: "test-model",
+                handle: "test/model",
+                label: "Test Model",
+                description: "Deterministic test model",
+                isDefault: true,
+              }],
+              available_handles: ["test/model"],
+            }));
+            return;
           case "input": {
             const payload = message.payload as WireMessage;
             if (payload.kind !== "create_message") return;

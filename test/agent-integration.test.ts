@@ -20,6 +20,7 @@ class FakeAppServer {
   readonly runtimeStartRequestIds: string[] = [];
   readonly createdAgentBodies: WireMessage[] = [];
   readonly approvalResponses: WireMessage[] = [];
+  readonly updatedModelPayloads: WireMessage[] = [];
   private nextConversation = 0;
   private activeControlSocket: ServerSocket | null = null;
   private activeRuntime: RuntimeScope | null = null;
@@ -178,6 +179,45 @@ class FakeAppServer {
           has_more: false,
         });
         return;
+      case "list_models":
+        socket.push({
+          type: "list_models_response",
+          request_id: requiredString(message.request_id, "list_models.request_id"),
+          success: true,
+          entries: [
+            {
+              id: "test-model",
+              handle: "test/model",
+              label: "Test Model",
+              description: "Deterministic test model",
+              isDefault: true,
+            },
+            {
+              id: "other-model",
+              handle: "test/other-model",
+              label: "Other Model",
+              description: "Alternate deterministic model",
+            },
+          ],
+          available_handles: ["test/model", "test/other-model"],
+        });
+        return;
+      case "update_model": {
+        const payload = message.payload as WireMessage;
+        this.updatedModelPayloads.push(payload);
+        const modelId = requiredString(payload.model_id, "update_model.model_id");
+        const handle = modelId === "other-model" ? "test/other-model" : "test/model";
+        socket.push({
+          type: "update_model_response",
+          request_id: requiredString(message.request_id, "update_model.request_id"),
+          success: true,
+          runtime: message.runtime,
+          applied_to: "conversation",
+          model_id: modelId,
+          model_handle: handle,
+        });
+        return;
+      }
       case "input":
         this.handleInput(socket, message);
         return;
@@ -595,6 +635,65 @@ describe("Agent SDK app-server integration", () => {
         "conv-test-3",
       ]);
       expect(new Set(server.runtimeStartRequestIds).size).toBe(3);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("advertises available models in the session configuration", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+
+      expect(session.configOptions).toEqual([
+        {
+          id: "model",
+          name: "Model",
+          description: "Model used for this Letta session",
+          category: "model",
+          type: "select",
+          currentValue: "test-model",
+          options: [
+            {
+              value: "test-model",
+              name: "Test Model",
+              description: "Deterministic test model",
+            },
+            {
+              value: "other-model",
+              name: "Other Model",
+              description: "Alternate deterministic model",
+            },
+          ],
+        },
+      ]);
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("switches models through session configuration options", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      const result = await agent.setSessionConfigOption({
+        sessionId: session.sessionId,
+        configId: "model",
+        value: "other-model",
+      });
+
+      expect(server.updatedModelPayloads).toEqual([{ model_id: "other-model" }]);
+      expect(result.configOptions[0]).toMatchObject({
+        id: "model",
+        category: "model",
+        currentValue: "other-model",
+      });
     } finally {
       agent.shutdown();
     }
