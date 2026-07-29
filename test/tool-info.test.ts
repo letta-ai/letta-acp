@@ -93,7 +93,22 @@ describe("tool output fallback", () => {
     expect(boundedToolOutput("hello")).toBe("hello");
   });
 
-  test("bounds long output while preserving its head, tail, and UTF-8", () => {
+  test("keeps only the first and last 12 lines", () => {
+    const output = `${Array.from({ length: 200 }, (_, index) => index + 1).join("\n")}\n`;
+    const bounded = boundedToolOutput(output);
+    const lines = bounded.trimEnd().split("\n");
+
+    expect(lines).toHaveLength(25);
+    expect(lines.slice(0, 12)).toEqual(
+      Array.from({ length: 12 }, (_, index) => String(index + 1)),
+    );
+    expect(lines[12]).toBe("… 176 lines omitted from display …");
+    expect(lines.slice(-12)).toEqual(
+      Array.from({ length: 12 }, (_, index) => String(index + 189)),
+    );
+  });
+
+  test("bounds a long line while preserving its head, tail, and UTF-8", () => {
     const output = `${"a".repeat(12_000)}🙂${"z".repeat(12_000)}`;
     const bounded = boundedToolOutput(output);
 

@@ -847,7 +847,7 @@ export class LettaAcpAgent {
               _meta: {
                 terminal_output: {
                   terminal_id: message.toolCallId,
-                  data: message.content,
+                  data: boundedToolOutput(message.content),
                 },
               },
             },

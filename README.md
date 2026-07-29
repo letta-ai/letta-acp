@@ -240,8 +240,8 @@ history ≈ `/resume`).
   `session/update` notifications.
 - When the client advertises `_meta.terminal_output`, Bash calls use ACP terminal
   content plus `terminal_info`, `terminal_output`, and `terminal_exit` updates.
-  Other clients receive a text fallback capped at 16 KiB for display, while
-  `rawOutput` retains the complete result.
+  Terminal and text displays retain the first and last 12 lines and are capped
+  at 16 KiB, while `rawOutput` retains the complete result.
 - Tool approvals: the SDK's `canUseTool` callback is forwarded as an ACP
   `session/request_permission` request. One Letta-specific wrinkle: the
   app-server transport ends the turn with a recoverable `approval_conflict`

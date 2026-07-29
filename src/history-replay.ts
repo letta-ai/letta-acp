@@ -130,7 +130,10 @@ export function historyToUpdates(
             sessionUpdate: "tool_call_update",
             toolCallId,
             _meta: {
-              terminal_output: { terminal_id: toolCallId, data: text },
+              terminal_output: {
+                terminal_id: toolCallId,
+                data: boundedToolOutput(text),
+              },
             },
           });
         }

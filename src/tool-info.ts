@@ -128,23 +128,38 @@ export function toolDiffContent(
   return [];
 }
 
-const TOOL_OUTPUT_FALLBACK_BYTES = 16 * 1024;
+const TOOL_OUTPUT_DISPLAY_BYTES = 16 * 1024;
+const TOOL_OUTPUT_DISPLAY_LINES = 24;
 
 export function isTerminalOutputTool(toolName: string): boolean {
   return toolName.toLowerCase() === "bash";
 }
 
 /**
- * Keep generic clients responsive without changing the full rawOutput payload.
- * Native-terminal clients receive the complete output through terminal metadata.
+ * Keep tool cards compact without changing the full rawOutput payload. Preserve
+ * both ends because failures and summaries commonly land at the end of output.
  */
 export function boundedToolOutput(content: string): string {
-  const encoded = Buffer.from(content);
-  if (encoded.byteLength <= TOOL_OUTPUT_FALLBACK_BYTES) return content;
+  const trailingNewline = content.endsWith("\n");
+  const lines = content.split("\n");
+  if (trailingNewline) lines.pop();
+  let display = content;
+  if (lines.length > TOOL_OUTPUT_DISPLAY_LINES) {
+    const side = TOOL_OUTPUT_DISPLAY_LINES / 2;
+    const omitted = lines.length - TOOL_OUTPUT_DISPLAY_LINES;
+    display = `${[
+      ...lines.slice(0, side),
+      `… ${omitted} lines omitted from display …`,
+      ...lines.slice(-side),
+    ].join("\n")}${trailingNewline ? "\n" : ""}`;
+  }
+
+  const encoded = Buffer.from(display);
+  if (encoded.byteLength <= TOOL_OUTPUT_DISPLAY_BYTES) return display;
 
   const marker = "\n\n… output truncated for display …\n\n";
   const markerBytes = Buffer.byteLength(marker);
-  const remaining = TOOL_OUTPUT_FALLBACK_BYTES - markerBytes;
+  const remaining = TOOL_OUTPUT_DISPLAY_BYTES - markerBytes;
   const headBytes = Math.floor(remaining / 2);
   const tailBytes = remaining - headBytes;
   return `${decodeUtf8Boundary(encoded.subarray(0, headBytes), "head")}${marker}${decodeUtf8Boundary(
