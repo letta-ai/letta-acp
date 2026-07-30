@@ -94,6 +94,11 @@ The adapter reaches Letta through one of four backends, selected with
 `LETTA_ACP_BACKEND` ([self-hosting docs](https://docs.letta.com/self-hosting)).
 Each subsection below shows the full `env` block for that backend.
 
+`LETTA_ACP_BACKEND` is optional: with it unset the backend follows the rest of
+the environment — `remote` when `LETTA_APP_SERVER_URL` is set, otherwise `cloud`
+when `LETTA_API_KEY` is set, otherwise `local`. The choice is logged at startup.
+Set the variable explicitly to override, which is what `cloud-oauth` requires.
+
 ### Letta Cloud (`cloud`)
 
 Agents run on Letta's hosted platform; the harness executes in a cloud
