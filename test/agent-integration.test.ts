@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentContext } from "@agentclientprotocol/sdk";
+import type { AgentContext, McpServer } from "@agentclientprotocol/sdk";
 import type { LettaCodeSocketConstructor } from "@letta-ai/letta-agent-sdk";
-import { LettaAcpAgent } from "../src/agent.js";
+import { LettaAcpAgent, toSdkMcpServers } from "../src/agent.js";
 import { SessionRegistry } from "../src/session-registry.js";
 
 interface RuntimeScope {
@@ -643,6 +643,66 @@ async function openSession(
 }
 
 describe("Agent SDK app-server integration", () => {
+  test("advertises and maps Agent SDK MCP transports", async () => {
+    const servers: McpServer[] = [
+      {
+        name: "local",
+        command: "/usr/bin/node",
+        args: ["server.js"],
+        env: [{ name: "TOKEN", value: "local-token" }],
+      },
+      {
+        type: "http",
+        name: "remote",
+        url: "https://example.com/mcp",
+        headers: [{ name: "Authorization", value: "Bearer token" }],
+      },
+      {
+        type: "sse",
+        name: "legacy",
+        url: "https://example.com/sse",
+        headers: [],
+      },
+      {
+        type: "acp",
+        name: "in-band",
+        serverId: "server-1",
+      },
+    ];
+
+    expect(toSdkMcpServers(servers)).toEqual({
+      local: {
+        command: "/usr/bin/node",
+        args: ["server.js"],
+        env: { TOKEN: "local-token" },
+      },
+      remote: {
+        type: "http",
+        url: "https://example.com/mcp",
+        headers: { Authorization: "Bearer token" },
+      },
+      legacy: {
+        type: "sse",
+        url: "https://example.com/sse",
+        headers: {},
+      },
+    });
+
+    const agent = createAgent(new FakeAppServer());
+    try {
+      const response = await agent.initialize({
+        protocolVersion: 1,
+        clientCapabilities: {},
+      });
+      expect(response.agentCapabilities?.mcpCapabilities).toEqual({
+        http: true,
+        sse: true,
+      });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
   test("preserves the memo personality when creating an ACP agent", async () => {
     const server = new FakeAppServer();
     const agent = createAgent(server, { agentId: undefined });
