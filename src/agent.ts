@@ -35,6 +35,7 @@ import {
   type SDKMessage,
   type SDKResultMessage,
 } from "@letta-ai/letta-agent-sdk";
+import { log } from "./log.js";
 import { authMethodsForClient } from "./auth.js";
 import type { LettaAcpConfig } from "./config.js";
 import {
@@ -1333,7 +1334,3 @@ export function toLettaContent(blocks: ContentBlock[]): MessageContentItem[] {
   return content;
 }
 
-function log(message: string): void {
-  // stdout carries the ACP JSON-RPC stream; all logging goes to stderr.
-  console.error(`[letta-acp] ${message}`);
-}
