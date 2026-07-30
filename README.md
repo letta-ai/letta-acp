@@ -29,22 +29,29 @@ bun install
 # smoke test with the bundled ACP client (spawns the agent over stdio)
 bun test-client.ts
 bun test-client.ts "List the files in this directory using your tools."
-
-# exercise the adapter through the real acpx client without credentials or an LLM
-bun run test:acpx
 ```
-
-The `acpx` integration test starts a deterministic fake Letta app server, then
-runs a prompt through the published `acpx` CLI and this adapter's real stdio
-entrypoint. It checks a complete tool-call lifecycle and runs as part of the
-normal `bun test` CI suite. Pushes to `main` also run `bun run test:acpx:live`,
-which authenticates to a dedicated Letta Cloud agent and creates a real session
-through acpx without spending model tokens. Locally, that command requires
-`LETTA_API_KEY` and `LETTA_ACP_TEST_AGENT_ID`.
 
 The first session creates a Letta agent and logs its id to stderr; set
 `LETTA_AGENT_ID` to that value to keep using the same agent (that's the point —
 its memory persists across sessions and editors).
+
+### Test the ACP boundary
+
+```bash
+# deterministic: acpx → adapter stdio → fake Letta app server
+bun run test:acpx
+
+# live transport: acpx → adapter stdio → Letta Cloud
+LETTA_API_KEY=... LETTA_ACP_TEST_AGENT_ID=agent-... bun run test:acpx:live
+```
+
+The deterministic test uses the published `acpx` CLI and this adapter's real
+stdio entrypoint to verify a complete tool-call lifecycle without credentials
+or an LLM. It is part of the normal `bun test` suite and runs on every pull
+request. Trusted pushes to `main` also run the live transport check against a
+dedicated Letta Cloud agent. That check creates a real session but deliberately
+skips the model turn, so it verifies authentication and session creation
+without spending model tokens.
 
 ## Use from Zed
 
@@ -91,7 +98,7 @@ Each subsection below shows the full `env` block for that backend.
 
 Agents run on Letta's hosted platform; the harness executes in a cloud
 sandbox. Get an API key at
-[app.letta.com/api-keys](https://app.letta.com/api-keys):
+[platform.letta.com/api-keys](https://platform.letta.com/api-keys):
 
 ```json
 "env": {
