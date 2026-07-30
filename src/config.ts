@@ -1,6 +1,5 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { log } from "./log.js";
 import type {
   LettaCodeClientOptions,
   PermissionMode,
@@ -39,41 +38,10 @@ const PERMISSION_MODES: PermissionMode[] = [
 
 const BACKENDS = ["local", "remote", "cloud", "cloud-oauth"] as const;
 
-/** Remote app-server URL, or undefined when unset or blank. */
-function remoteUrlOf(
-  env: Record<string, string | undefined>,
-): string | undefined {
-  const url = env.LETTA_APP_SERVER_URL;
-  return url && url.trim().length > 0 ? url : undefined;
-}
-
-/**
- * Backend to use when `LETTA_ACP_BACKEND` is not set.
- *
- * The environment already says where the agent should live, so requiring a
- * second variable to repeat it is a step users forget — and the failure is
- * indirect: the adapter starts, opens a session, then dies mid-turn on a
- * credential the chosen backend never needed.
- *
- * An app-server URL names one specific server, so it wins over an API key that
- * may have been exported for unrelated tooling; the key alone means Letta
- * Cloud; neither means everything runs here. Set `LETTA_ACP_BACKEND` to
- * override.
- */
-function inferBackend(env: Record<string, string | undefined>): string {
-  if (remoteUrlOf(env)) return "remote";
-  if (env.LETTA_API_KEY) return "cloud";
-  return "local";
-}
-
 export function configFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): LettaAcpConfig {
-  const explicitBackend = env.LETTA_ACP_BACKEND;
-  const backend = explicitBackend ?? inferBackend(env);
-  if (!explicitBackend) {
-    log(`backend inferred from the environment: ${backend}`);
-  }
+  const backend = env.LETTA_ACP_BACKEND ?? "local";
 
   let clientOptions: LettaCodeClientOptions;
   let sessionRegistryScope = backend;
@@ -82,7 +50,7 @@ export function configFromEnv(
       clientOptions = { backend: "local" };
       break;
     case "remote": {
-      const url = remoteUrlOf(env) ?? "ws://127.0.0.1:4500";
+      const url = env.LETTA_APP_SERVER_URL ?? "ws://127.0.0.1:4500";
       clientOptions = {
         backend: "remote",
         url,
