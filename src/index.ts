@@ -6,13 +6,14 @@
  * backed by a Letta agent via @letta-ai/letta-agent-sdk.
  *
  * Environment:
- *   LETTA_ACP_BACKEND          local | remote | cloud | cloud-oauth. Inferred
+ *   LETTA_ACP_BACKEND          local | remote | cloud (= cloud-oauth). Inferred
  *                              when unset: remote if LETTA_APP_SERVER_URL is
  *                              set, else cloud if LETTA_API_KEY is set, else
- *                              local.
+ *                              local. Tools always execute locally, except on
+ *                              remote.
  *   LETTA_APP_SERVER_URL       remote backend URL (default ws://127.0.0.1:4500)
  *   LETTA_APP_SERVER_TOKEN     remote backend auth token
- *   LETTA_API_KEY              cloud backend API key (not needed for cloud-oauth)
+ *   LETTA_API_KEY              Letta Cloud API key (cloud and cloud-oauth)
  *   LETTA_AGENT_ID             reuse an existing agent (recommended)
  *   LETTA_ACP_MODEL            model override for sessions
  *   LETTA_ACP_PERMISSION_MODE  standard (default) | acceptEdits | unrestricted

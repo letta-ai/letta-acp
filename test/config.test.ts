@@ -7,12 +7,36 @@ import { configFromEnv } from "../src/config.js";
  * the result.
  */
 describe("backend inference", () => {
-  test("an API key alone selects cloud", () => {
+  test("an API key alone selects cloud storage with local execution", () => {
+    // `cloud-oauth` is a local app-server pointed at Letta Cloud: the agent
+    // lives in the cloud, tools run on this machine. Plain `cloud` would move
+    // execution into Letta's sandbox, away from the ACP client's files.
     const config = configFromEnv({ LETTA_API_KEY: "sk-let-test" });
     expect(config.clientOptions).toEqual({
-      backend: "cloud",
-      apiKey: "sk-let-test",
+      backend: "local",
+      appServer: { harnessBackend: "api" },
     });
+    expect(config.sessionRegistryScope).toBe("cloud");
+  });
+
+  test("an explicit cloud backend also executes locally", () => {
+    // The SDK's sandboxed cloud mode is deliberately not reachable: an ACP
+    // client's cwd, files, and terminals exist only on this machine.
+    const config = configFromEnv({
+      LETTA_ACP_BACKEND: "cloud",
+      LETTA_API_KEY: "sk-let-test",
+    });
+    expect(config.clientOptions).toEqual({
+      backend: "local",
+      appServer: { harnessBackend: "api" },
+    });
+    expect(config.sessionRegistryScope).toBe("cloud");
+  });
+
+  test("cloud and cloud-oauth are the same backend", () => {
+    expect(configFromEnv({ LETTA_ACP_BACKEND: "cloud" })).toEqual(
+      configFromEnv({ LETTA_ACP_BACKEND: "cloud-oauth" }),
+    );
   });
 
   test("an empty environment stays local", () => {
@@ -42,10 +66,11 @@ describe("backend inference", () => {
   });
 
   test("a blank URL does not select remote", () => {
+    // Falls through to the key, i.e. cloud storage with local execution.
     expect(
       configFromEnv({ LETTA_APP_SERVER_URL: "  ", LETTA_API_KEY: "sk-let-test" })
-        .clientOptions,
-    ).toMatchObject({ backend: "cloud" });
+        .sessionRegistryScope,
+    ).toBe("cloud");
     expect(
       configFromEnv({ LETTA_APP_SERVER_URL: "" }).clientOptions,
     ).toEqual({ backend: "local" });
@@ -62,10 +87,9 @@ describe("backend inference", () => {
     expect(config.sessionRegistryScope).toBe("cloud");
   });
 
-  test("an explicit cloud backend still requires a key", () => {
-    expect(() => configFromEnv({ LETTA_ACP_BACKEND: "cloud" })).toThrow(
-      /requires LETTA_API_KEY/,
-    );
+  test("cloud works without a key, via letta login", () => {
+    // Credentials resolve like the CLI's: keychain token or LETTA_API_KEY.
+    expect(() => configFromEnv({ LETTA_ACP_BACKEND: "cloud" })).not.toThrow();
   });
 
   test("an unknown backend is rejected", () => {

@@ -56,9 +56,10 @@ function remoteUrlOf(
  * credential the chosen backend never needed.
  *
  * An app-server URL names one specific server, so it wins over an API key that
- * may have been exported for unrelated tooling; the key alone means Letta
- * Cloud; neither means everything runs here. Set `LETTA_ACP_BACKEND` to
- * override.
+ * may have been exported for unrelated tooling; neither means everything runs
+ * here. Set `LETTA_ACP_BACKEND` to override.
+ *
+ * An API key means the agent lives on Letta Cloud; tools still execute here.
  */
 function inferBackend(env: Record<string, string | undefined>): string {
   if (remoteUrlOf(env)) return "remote";
@@ -91,25 +92,23 @@ export function configFromEnv(
       sessionRegistryScope = `remote:${url}`;
       break;
     }
-    case "cloud": {
-      const apiKey = env.LETTA_API_KEY;
-      if (!apiKey) {
-        throw new Error(
-          "LETTA_ACP_BACKEND=cloud requires LETTA_API_KEY. " +
-            'To use your existing `letta login` session instead, set LETTA_ACP_BACKEND="cloud-oauth".',
-        );
-      }
-      clientOptions = { backend: "cloud", apiKey };
-      break;
-    }
+    // `cloud` and `cloud-oauth` are the same backend: the agent lives on Letta
+    // Cloud and tools execute here.
+    //
+    // The SDK also offers a sandboxed cloud mode, where tool calls run in a
+    // Letta-managed container. This adapter deliberately does not expose it. An
+    // ACP client hands the agent a `cwd`, filesystem tools, and terminals that
+    // exist only on the client's machine, so an agent that cannot reach them is
+    // broken in a way that surfaces late and confusingly: sessions open, model
+    // catalogs list, and the agent then reports missing files and missing CLIs
+    // for a project it was never able to see.
+    //
+    // Credentials resolve the way the letta-code CLI resolves them — OS
+    // keychain tokens from `letta login`, refreshed automatically, falling back
+    // to LETTA_API_KEY when present — so either form of auth works here.
+    case "cloud":
     case "cloud-oauth":
       sessionRegistryScope = "cloud";
-      // Cloud agents authenticated through the letta-code harness rather than
-      // an explicit API key: the SDK spawns a local app-server pointed at
-      // Letta Cloud, and that harness resolves credentials the same way the
-      // CLI does (OS keychain tokens from `letta login`, with automatic
-      // refresh, falling back to LETTA_API_KEY when present). Tools still
-      // execute on this machine.
       clientOptions = {
         backend: "local",
         appServer: { harnessBackend: "api" },

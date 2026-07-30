@@ -95,29 +95,33 @@ The adapter reaches Letta through one of four backends, selected with
 Each subsection below shows the full `env` block for that backend.
 
 `LETTA_ACP_BACKEND` is optional: with it unset the backend follows the rest of
-the environment — `remote` when `LETTA_APP_SERVER_URL` is set, otherwise `cloud`
-when `LETTA_API_KEY` is set, otherwise `local`. The choice is logged at startup.
-Set the variable explicitly to override, which is what `cloud-oauth` requires.
+the environment — `remote` when `LETTA_APP_SERVER_URL` is set, otherwise
+`cloud` when `LETTA_API_KEY` is set, otherwise `local`. The choice is logged at
+startup. Set the variable explicitly to override.
 
-### Letta Cloud (`cloud`)
+**Tools always execute on your machine** (except `remote`, where they execute on
+the app server you pointed at). Letta also offers a sandboxed cloud runtime, in
+which tool calls run in a Letta-managed container; this adapter does not expose
+it. An ACP client hands the agent a working directory, filesystem tools, and
+terminals that exist only where the client runs, so an agent that cannot reach
+them is not useful over ACP.
 
-Agents run on Letta's hosted platform; the harness executes in a cloud
-sandbox. Get an API key at
+### Letta Cloud (`cloud`, also spelled `cloud-oauth`)
+
+Agents and their memory live on Letta's hosted platform, with cloud-side model
+access — no provider key of your own. Tools execute here. Authenticate either
+with an API key from
 [platform.letta.com/api-keys](https://platform.letta.com/api-keys):
 
 ```json
 "env": {
-  "LETTA_ACP_BACKEND": "cloud",
   "LETTA_API_KEY": "sk-let-...",
   "LETTA_AGENT_ID": "agent-..."
 }
 ```
 
-### Letta Cloud via OAuth (`cloud-oauth`)
-
-Same cloud agents as `cloud`, but authenticated with your existing
-`letta login` session instead of an API key — so no long-lived secret has to
-be pasted into your editor's settings file.
+…or with your existing `letta login` session, so no long-lived secret has to be
+pasted into your editor's settings file.
 
 ```json
 "env": {
@@ -136,9 +140,8 @@ automatically as they expire, falling back to `LETTA_API_KEY` if one is set.
 Mechanically this is the `local` backend with the harness pointed at Letta
 Cloud (`harnessBackend: "api"`): the SDK spawns a loopback app-server on your
 machine, the agent and its memory live in Cloud (real `agent-*` ids, cloud-side
-models), and — unlike `cloud` — built-in tools such as `Read` and `Bash`
-execute against **your** filesystem rather than a cloud sandbox. For editor use
-that's usually what you want.
+models), and built-in tools such as `Read` and `Bash` execute against **your**
+filesystem.
 
 ### Local runtime (`local`, default)
 
@@ -185,9 +188,9 @@ non-loopback deployments enable auth
 | `LETTA_ACP_MODEL` | model override for sessions, as a `provider/model` handle (e.g. `anthropic/claude-fable-5`, `openai/gpt-4.1`) — run `/model` in a thread to list valid handles |
 | `LETTA_ACP_PERMISSION_MODE` | initial session mode: `standard` (default), `acceptEdits`, `unrestricted` — switchable live via `session/set_mode` (Zed's mode dropdown) |
 
-Note on tool execution: with `remote` and `cloud`, built-in tools (Read, Bash,
-…) run where the harness runs — the server/sandbox filesystem, not your
-machine. With `local` and `cloud-oauth` they run on your machine. The editor fs tools (`read_editor_buffer`, `write_via_editor`) always
+Note on tool execution: with `remote`, built-in tools (Read, Bash, …) run on
+the app server, not your machine. With `local` and `cloud` they run on your
+machine. The editor fs tools (`read_editor_buffer`, `write_via_editor`) always
 operate on the editor's files regardless of backend, since they execute in the
 adapter and delegate to the ACP client.
 
