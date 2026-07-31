@@ -122,7 +122,9 @@ jobs:
 
           if [ "$HAS_TARGETS" = true ] && [ "$TARGETS_MATCH" = true ]; then
             NEW_VERSION="$OLD_VERSION"
+            UPDATE_MANIFESTS=false
           else
+            UPDATE_MANIFESTS=true
             if [[ "$OLD_VERSION" == *-* ]]; then
               OLD_IS_PRERELEASE=true
               BASE_VERSION=$(echo "$OLD_VERSION" | sed 's/-.*//')
@@ -177,8 +179,10 @@ jobs:
           echo "tag=v$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "letta_agent_sdk_version=$LETTA_AGENT_SDK_VERSION" >> "$GITHUB_OUTPUT"
           echo "letta_code_version=$LETTA_CODE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "update_manifests=$UPDATE_MANIFESTS" >> "$GITHUB_OUTPUT"
 
       - name: Update package manifests
+        if: steps.version.outputs.update_manifests == 'true'
         env:
           NEW_VERSION: ${{ steps.version.outputs.new_version }}
           LETTA_AGENT_SDK_VERSION: ${{ steps.version.outputs.letta_agent_sdk_version }}
