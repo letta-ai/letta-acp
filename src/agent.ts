@@ -799,10 +799,13 @@ export class LettaAcpAgent {
       }
       if (message.type === "loop_status") {
         activeRunIds = message.activeRunIds;
-        // An abort that lands before the run produces output never gets a
-        // terminal result from the SDK — the return to WAITING_ON_INPUT is
-        // the only end-of-turn signal, in "turn" mode too.
+        // An abort after real turn activity makes the SDK enqueue this idle
+        // status followed by the cancelled turn's synthesized result. Drain
+        // that result before returning so the next prompt cannot consume it
+        // as its own terminal event. An abort before any activity has no
+        // result, so the idle status remains its only completion signal.
         if (message.status === "WAITING_ON_INPUT" && state.cancelled) {
+          if (sawActivity) continue;
           return { kind: "idle" };
         }
         if (mode === "recovery") {
