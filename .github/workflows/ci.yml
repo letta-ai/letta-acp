@@ -86,7 +86,7 @@ jobs:
   # deterministic acpx suite above, including forks and Dependabot.
   live-local:
     name: Live local backend
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -110,7 +110,7 @@ jobs:
 
   live-cloud:
     name: Live Cloud backend
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
