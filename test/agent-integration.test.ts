@@ -34,6 +34,8 @@ class FakeAppServer {
   private activeCommand: string | null = null;
   private approvalWaiters: Array<(payload: WireMessage) => void> = [];
   private commandWaiters: Array<() => void> = [];
+  private cancelablePromptWaiters: Array<() => void> = [];
+  private cancelablePromptActive = false;
 
   socketConstructor(): LettaCodeSocketConstructor {
     const server = this;
@@ -101,6 +103,13 @@ class FakeAppServer {
   nextCommand(): Promise<void> {
     return new Promise((resolve) => {
       this.commandWaiters.push(resolve);
+    });
+  }
+
+  /** Resolves after a prompt has produced activity but before it completes. */
+  nextCancelablePrompt(): Promise<void> {
+    return new Promise((resolve) => {
+      this.cancelablePromptWaiters.push(resolve);
     });
   }
 
@@ -286,7 +295,7 @@ class FakeAppServer {
           ),
           success: true,
         });
-        if (this.activeCommand) {
+        if (this.activeCommand || this.cancelablePromptActive) {
           socket.push({
             type: "update_loop_status",
             runtime: this.activeRuntime,
@@ -295,6 +304,7 @@ class FakeAppServer {
               active_run_ids: [],
             },
           });
+          this.cancelablePromptActive = false;
         }
         return;
       default:
@@ -349,6 +359,38 @@ class FakeAppServer {
     }
 
     const promptText = JSON.stringify(payload.messages);
+    if (promptText.includes("cancel active prompt")) {
+      this.cancelablePromptActive = true;
+      for (const waiter of this.cancelablePromptWaiters.splice(0)) waiter();
+      this.pushDelta(socket, runtime, {
+        message_type: "tool_call_message",
+        run_id: "run-cancelled",
+        tool_calls: [
+          {
+            id: "call-cancelled-agent",
+            name: "Agent",
+            arguments: JSON.stringify({
+              description: "Inspect test coverage",
+              prompt: "Review the repository tests",
+            }),
+          },
+        ],
+      });
+      return;
+    }
+    if (promptText.includes("replacement after cancel")) {
+      this.pushDelta(socket, runtime, {
+        message_type: "assistant_message",
+        run_id: "run-replacement",
+        content: "REPLACEMENT_OK",
+      });
+      this.pushDelta(socket, runtime, {
+        message_type: "stop_reason",
+        run_id: "run-replacement",
+        stop_reason: "end_turn",
+      });
+      return;
+    }
     if (promptText.includes("fragmented prompt")) {
       this.streamFragmentedToolCall(socket, runtime);
       return;
@@ -1687,6 +1729,44 @@ describe("Agent SDK app-server integration", () => {
       expect(updates).toContainEqual({
         sessionUpdate: "agent_message_chunk",
         content: { type: "text", text: "COMMAND_APPROVAL_OK" },
+      });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("drains a cancelled turn before starting its replacement", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, updates } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      const started = server.nextCancelablePrompt();
+      const first = agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "cancel active prompt" }],
+        },
+        context,
+      );
+      await started;
+      await agent.cancel({ sessionId: session.sessionId });
+      expect(await first).toEqual({ stopReason: "cancelled" });
+
+      const replacementUpdateStart = updates.length;
+      const replacement = await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "replacement after cancel" }],
+        },
+        context,
+      );
+
+      expect(replacement).toEqual({ stopReason: "end_turn" });
+      expect(updates.slice(replacementUpdateStart)).toContainEqual({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "REPLACEMENT_OK" },
       });
     } finally {
       agent.shutdown();
