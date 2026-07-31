@@ -42,17 +42,19 @@ the same persistent memory.
 # deterministic: acpx → adapter stdio → fake Letta app server
 bun run test:acpx
 
-# live transport: acpx → adapter stdio → Letta Cloud
-LETTA_API_KEY=... LETTA_ACP_TEST_AGENT_ID=agent-... bun run test:acpx:live
+# live backends: adapter stdio → local Letta with Luna / Letta Cloud with auto
+OPENAI_API_KEY=... bun run test:backend:live:local
+LETTA_API_KEY=... bun run test:backend:live:cloud
 ```
 
 The deterministic test uses the published `acpx` CLI and this adapter's real
 stdio entrypoint to verify a complete tool-call lifecycle without credentials
 or an LLM. It is part of the normal `bun test` suite and runs on every pull
-request. Trusted pushes to `main` also run the live transport check against a
-dedicated Letta Cloud agent. That check creates a real session but deliberately
-skips the model turn, so it verifies authentication and session creation
-without spending model tokens.
+request. Trusted pushes to `main` also list models, create an agent, and send a
+message through both live backends. The local check receives only
+`OPENAI_API_KEY` and uses `openai/gpt-5.6-luna`; the Cloud check receives only
+`LETTA_API_KEY` and uses `letta/auto`. The Cloud agent is deleted afterward,
+and the local agent lives only in the test's temporary home directory.
 
 ## Use from Zed
 

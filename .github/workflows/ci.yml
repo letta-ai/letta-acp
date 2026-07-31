@@ -41,14 +41,21 @@ jobs:
       - name: Typecheck, test (including acpx), and build
         run: bun run check
 
-      # Keep the credential on trusted main-branch code. Pull requests still run
+      # Keep credentials on trusted main-branch code. Pull requests still run
       # the deterministic acpx suite above, including forks and Dependabot.
-      - name: Create a Letta Cloud session through acpx
+      - name: Exercise the local backend with OpenAI only
+        if: github.event_name == 'push'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LETTA_API_KEY: ""
+        run: bun run test:backend:live:local
+
+      - name: Exercise the Cloud backend with Letta only
         if: github.event_name == 'push'
         env:
           LETTA_API_KEY: ${{ secrets.LETTA_API_KEY }}
-          LETTA_ACP_TEST_AGENT_ID: ${{ vars.LETTA_ACP_TEST_AGENT_ID }}
-        run: bun run test:acpx:live
+          OPENAI_API_KEY: ""
+        run: bun run test:backend:live:cloud
 
       - name: Pack and install as a consumer
         shell: bash
