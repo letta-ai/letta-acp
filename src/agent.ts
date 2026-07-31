@@ -36,7 +36,7 @@ import {
   type SDKResultMessage,
 } from "@letta-ai/letta-agent-sdk";
 import { authMethodsForClient } from "./auth.js";
-import type { LettaAcpConfig } from "./config.js";
+import { DEFAULT_ACP_MODEL, type LettaAcpConfig } from "./config.js";
 import {
   createEditorTools,
   type EditorFsCapabilities,
@@ -1205,9 +1205,9 @@ export class LettaAcpAgent {
       // SDK 0.5 made personality presets opt-in. Keep the adapter's established
       // behavior instead of silently creating a zero-memory generic agent.
       personality: "memo",
-      name: "ACP agent",
-      description: "Letta agent driven by an ACP client (e.g. Zed)",
-      model: this.config.model,
+      name: "Letta",
+      description: "Letta agent driven through the Agent Client Protocol",
+      model: this.config.model ?? DEFAULT_ACP_MODEL,
     });
     log(
       `created agent ${agentId} — set LETTA_AGENT_ID=${agentId} to keep using it`,
