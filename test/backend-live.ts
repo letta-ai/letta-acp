@@ -167,8 +167,11 @@ async function exerciseBackend(
       `${selectedBackend} agent creation`,
     );
     sessionId = session.sessionId;
+    const conversationPrefix = selectedBackend === "local"
+      ? "local-conv-"
+      : "conv-";
     assert(
-      sessionId.startsWith("conv-"),
+      sessionId.startsWith(conversationPrefix),
       `Expected a Letta conversation id, received ${sessionId}.`,
     );
 
