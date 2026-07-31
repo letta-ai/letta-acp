@@ -29,23 +29,30 @@ bun install
 # smoke test with the bundled ACP client (spawns the agent over stdio)
 bun test-client.ts
 bun test-client.ts "List the files in this directory using your tools."
-
-# exercise the adapter through the real acpx client without credentials or an LLM
-bun run test:acpx
 ```
-
-The `acpx` integration test starts a deterministic fake Letta app server, then
-runs a prompt through the published `acpx` CLI and this adapter's real stdio
-entrypoint. It checks a complete tool-call lifecycle and runs as part of the
-normal `bun test` CI suite. Pushes to `main` also run `bun run test:acpx:live`,
-which authenticates to a dedicated Letta Cloud agent and creates a real session
-through acpx without spending model tokens. Locally, that command requires
-`LETTA_API_KEY` and `LETTA_ACP_TEST_AGENT_ID`.
 
 Without `LETTA_AGENT_ID`, the first session creates a visible, globally
 unpinned agent named **Letta** using `letta/auto`, then logs its id to stderr.
 Set `LETTA_AGENT_ID` to that value when future adapter processes should reuse
 the same persistent memory.
+
+### Test the ACP boundary
+
+```bash
+# deterministic: acpx → adapter stdio → fake Letta app server
+bun run test:acpx
+
+# live transport: acpx → adapter stdio → Letta Cloud
+LETTA_API_KEY=... LETTA_ACP_TEST_AGENT_ID=agent-... bun run test:acpx:live
+```
+
+The deterministic test uses the published `acpx` CLI and this adapter's real
+stdio entrypoint to verify a complete tool-call lifecycle without credentials
+or an LLM. It is part of the normal `bun test` suite and runs on every pull
+request. Trusted pushes to `main` also run the live transport check against a
+dedicated Letta Cloud agent. That check creates a real session but deliberately
+skips the model turn, so it verifies authentication and session creation
+without spending model tokens.
 
 ## Use from Zed
 
@@ -92,7 +99,7 @@ Each subsection below shows the full `env` block for that backend.
 
 Agents run on Letta's hosted platform; the harness executes in a cloud
 sandbox. Get an API key at
-[app.letta.com/api-keys](https://app.letta.com/api-keys):
+[platform.letta.com/api-keys](https://platform.letta.com/api-keys):
 
 ```json
 "env": {
@@ -171,7 +178,7 @@ non-loopback deployments enable auth
 | Variable | Effect |
 |----------|--------|
 | `LETTA_AGENT_ID` | reuse an existing agent instead of creating a visible, globally unpinned agent named `Letta` |
-| `LETTA_ACP_MODEL` | model for new agents and sessions (default `letta/auto`), as a `provider/model` handle (e.g. `anthropic/claude-fable-5`, `openai/gpt-4.1`) — run `/model` in a thread to list valid handles |
+| `LETTA_ACP_MODEL` | optional model override for sessions, as a `provider/model` handle (e.g. `anthropic/claude-fable-5`, `openai/gpt-4.1`); new agents default to `letta/auto`, while reused agents keep their model when this is unset — run `/model` to list valid handles |
 | `LETTA_ACP_PERMISSION_MODE` | initial session mode: `standard` (default), `acceptEdits`, `unrestricted` — switchable live via `session/set_mode` (Zed's mode dropdown) |
 
 Note on tool execution: with `remote` and `cloud`, built-in tools (Read, Bash,
@@ -196,7 +203,7 @@ adapter and delegate to the ACP client.
 | Model listing and switching (`configOptions` + `session/set_config_option`) | ✅ |
 | Slash commands (`available_commands_update`, ~30 commands + skills) | ✅ |
 | Client fs delegation (`fs/read_text_file`, `fs/write_text_file`) | ✅ via external tools |
-| MCP servers from `session/new` / `session/load` | ✅ stdio, via Agent SDK external tools |
+| MCP servers from `session/new` / `session/load` | ✅ stdio, HTTP, and SSE via Agent SDK external tools |
 | Native Bash result rendering (`_meta.terminal_output`) | ✅ when supported by the client |
 | Client-side command execution (`terminal/*`) | ❌ (planned) |
 | Plan updates (`plan` from TodoWrite) | ❌ (planned) |
@@ -283,13 +290,9 @@ piece.
 
 ## MCP servers
 
-ACP clients can pass MCP servers in `session/new` and `session/load`. The
-adapter forwards stdio server configurations to `@letta-ai/letta-agent-sdk`,
-which starts each server in the session cwd and exposes its tools through Letta
-Code's external-tool protocol. Tool names use
-`mcp__<server>__<tool>` namespacing, and the SDK closes each server with its
-session. A server that fails to start is logged and skipped without failing the
-whole ACP session.
-
-HTTP and SSE MCP transports are not yet supported, so the adapter does not
-advertise `mcpCapabilities` for them.
+ACP clients can pass stdio, Streamable HTTP, and SSE MCP servers in
+`session/new` and `session/load`. The adapter maps the ACP transport shape to
+`@letta-ai/letta-agent-sdk`, which owns connections, tool discovery,
+`mcp__<server>__<tool>` namespacing, execution, failure isolation, and cleanup
+for the session. The adapter advertises HTTP and SSE MCP capabilities; ACP's
+experimental in-band MCP transport is not supported.

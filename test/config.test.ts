@@ -2,11 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { configFromEnv, DEFAULT_ACP_MODEL } from "../src/config.js";
 
 describe("ACP agent defaults", () => {
-  test("defaults new local agents to letta/auto without global pinning", () => {
+  test("keeps the session model unset and disables global pinning by default", () => {
     const config = configFromEnv({});
 
     expect(config.agentId).toBeUndefined();
-    expect(config.model).toBe(DEFAULT_ACP_MODEL);
+    expect(config.model).toBeUndefined();
+    expect(DEFAULT_ACP_MODEL).toBe("letta/auto");
     expect(config.clientOptions).toEqual({
       backend: "local",
       appServer: { pinGlobalAgent: false },

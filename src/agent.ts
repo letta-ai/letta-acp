@@ -29,14 +29,14 @@ import {
   LettaAgentClient,
   type LettaCodeSession,
   type LettaConversation,
-  type McpServerConfig,
+  type McpServers,
   type MessageContentItem,
   type PermissionMode,
   type SDKMessage,
   type SDKResultMessage,
 } from "@letta-ai/letta-agent-sdk";
 import { authMethodsForClient } from "./auth.js";
-import type { LettaAcpConfig } from "./config.js";
+import { DEFAULT_ACP_MODEL, type LettaAcpConfig } from "./config.js";
 import {
   createEditorTools,
   type EditorFsCapabilities,
@@ -193,6 +193,7 @@ export class LettaAcpAgent {
       agentCapabilities: {
         loadSession: true,
         sessionCapabilities: { list: {} },
+        mcpCapabilities: { http: true, sse: true },
         promptCapabilities: {
           image: true,
           embeddedContext: true,
@@ -483,7 +484,7 @@ export class LettaAcpAgent {
           context,
         ),
       ...(editorTools.length > 0 ? { tools: editorTools } : {}),
-      ...(mcpServers.length > 0 ? { mcpServers } : {}),
+      ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
     };
     const session = options.resumeId
       ? this.client.resumeSession(options.resumeId, sessionOptions)
@@ -1203,7 +1204,7 @@ export class LettaAcpAgent {
       personality: "memo",
       name: "Letta",
       description: "Letta agent driven through the Agent Client Protocol",
-      model: this.config.model,
+      model: this.config.model ?? DEFAULT_ACP_MODEL,
     });
     log(
       `created agent ${agentId} — set LETTA_AGENT_ID=${agentId} to keep using it`,
@@ -1247,51 +1248,41 @@ function knownToolName(toolName: string): string | undefined {
   return toolName;
 }
 
-/**
- * Convert ACP's MCP server union to the stdio configuration owned by the Agent
- * SDK. HTTP and SSE require capabilities this adapter does not advertise yet.
- */
-function toSdkMcpServers(
+/** Convert ACP transport shapes to the Agent SDK's keyed MCP configuration. */
+export function toSdkMcpServers(
   servers: readonly McpServer[] | undefined,
-): McpServerConfig[] {
-  const configs: McpServerConfig[] = [];
+): McpServers {
+  const configs: Array<[string, McpServers[string]]> = [];
   for (const server of servers ?? []) {
-    const type = (server as { type?: string }).type;
-    if (type !== undefined && type !== "stdio") {
-      log(
-        `MCP server "${server.name}" skipped: only stdio transport is supported`,
-      );
+    if (!("type" in server)) {
+      configs.push([
+        server.name,
+        {
+          command: server.command,
+          args: server.args,
+          env: Object.fromEntries(
+            server.env.map(({ name, value }) => [name, value]),
+          ),
+        },
+      ]);
       continue;
     }
-
-    const stdio = server as {
-      name: string;
-      command?: unknown;
-      args?: unknown;
-      env?: unknown;
-    };
-    if (typeof stdio.command !== "string" || stdio.command.length === 0) {
-      log(`MCP server "${server.name}" skipped: missing stdio command`);
+    if (server.type === "http" || server.type === "sse") {
+      configs.push([
+        server.name,
+        {
+          type: server.type,
+          url: server.url,
+          headers: Object.fromEntries(
+            server.headers.map(({ name, value }) => [name, value]),
+          ),
+        },
+      ]);
       continue;
     }
-    const args = Array.isArray(stdio.args)
-      ? stdio.args.filter((arg): arg is string => typeof arg === "string")
-      : [];
-    const env = Array.isArray(stdio.env)
-      ? stdio.env.flatMap((entry) => {
-          if (!entry || typeof entry !== "object") return [];
-          const { name, value } = entry as {
-            name?: unknown;
-            value?: unknown;
-          };
-          return typeof name === "string" && typeof value === "string"
-            ? [{ name, value }]
-            : [];
-        })
-      : [];
-    configs.push({ name: stdio.name, command: stdio.command, args, env });
+    log(`MCP server "${server.name}" skipped: ACP transport is not supported`);
   }
-  return configs;
+  return Object.fromEntries(configs);
 }
 
 /** ACP prompt content blocks -> Letta multimodal message content. */

@@ -107,7 +107,7 @@ export function configFromEnv(
   return {
     clientOptions,
     agentId: env.LETTA_AGENT_ID,
-    model: env.LETTA_ACP_MODEL ?? DEFAULT_ACP_MODEL,
+    model: env.LETTA_ACP_MODEL,
     permissionMode: permissionMode as PermissionMode,
     sessionRegistryDir:
       env.LETTA_ACP_STATE_DIR ?? join(homedir(), ".letta", "letta-acp", "sessions"),

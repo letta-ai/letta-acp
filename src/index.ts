@@ -11,7 +11,7 @@
  *   LETTA_APP_SERVER_TOKEN     remote backend auth token
  *   LETTA_API_KEY              cloud backend API key (not needed for cloud-oauth)
  *   LETTA_AGENT_ID             reuse an existing agent (recommended)
- *   LETTA_ACP_MODEL            model for new agents/sessions (default letta/auto)
+ *   LETTA_ACP_MODEL            optional model override (new agents default letta/auto)
  *   LETTA_ACP_PERMISSION_MODE  standard (default) | acceptEdits | unrestricted
  */
 import { Readable, Writable } from "node:stream";
