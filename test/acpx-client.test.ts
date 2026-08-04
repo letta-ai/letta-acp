@@ -210,7 +210,9 @@ async function runAcpx(
   return { stdout, stderr, home, appServerUrl, cwd };
 }
 
-async function verifyMcpShutdownOnClientDisconnect(): Promise<void> {
+async function verifyMcpShutdown(
+  trigger: "stdin-close" | "SIGTERM",
+): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), "letta-acp-mcp-shutdown-"));
   tempDirs.push(home);
   const marker = join(home, "shutdown-marker");
@@ -286,11 +288,15 @@ async function verifyMcpShutdownOnClientDisconnect(): Promise<void> {
     expect(sessionOpened).toBe(true);
     expect(existsSync(pidFile)).toBe(true);
 
-    child.stdin.end();
+    if (trigger === "SIGTERM") {
+      child.kill("SIGTERM");
+    } else {
+      child.stdin.end();
+    }
     const exitCode = await Promise.race([
       child.exited,
       Bun.sleep(8_000).then(() => {
-        throw new Error("adapter did not exit after ACP stdin closed");
+        throw new Error(`adapter did not exit after ${trigger}`);
       }),
     ]);
     expect(exitCode).toBe(0);
@@ -342,7 +348,11 @@ describe("acpx client compatibility", () => {
   }, 10_000);
 
   test("waits for MCP subprocess cleanup after the client disconnects", async () => {
-    await verifyMcpShutdownOnClientDisconnect();
+    await verifyMcpShutdown("stdin-close");
+  }, 12_000);
+
+  test("closes child processes when the ACP server receives SIGTERM", async () => {
+    await verifyMcpShutdown("SIGTERM");
   }, 12_000);
 
   test("emits a complete tool lifecycle as ACP notifications", async () => {
