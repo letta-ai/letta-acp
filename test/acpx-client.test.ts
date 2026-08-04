@@ -210,7 +210,9 @@ async function runAcpx(
   return { stdout, stderr, home, appServerUrl, cwd };
 }
 
-async function verifyMcpShutdownOnClientDisconnect(): Promise<void> {
+async function verifyMcpShutdown(
+  trigger: "stdin-close" | "SIGTERM",
+): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), "letta-acp-mcp-shutdown-"));
   tempDirs.push(home);
   const marker = join(home, "shutdown-marker");
@@ -286,15 +288,19 @@ async function verifyMcpShutdownOnClientDisconnect(): Promise<void> {
     expect(sessionOpened).toBe(true);
     expect(existsSync(pidFile)).toBe(true);
 
-    child.stdin.end();
+    if (trigger === "SIGTERM") {
+      child.kill("SIGTERM");
+    } else {
+      child.stdin.end();
+    }
     const exitCode = await Promise.race([
       child.exited,
       Bun.sleep(8_000).then(() => {
-        throw new Error("adapter did not exit after ACP stdin closed");
+        throw new Error(`adapter did not exit after ${trigger}`);
       }),
     ]);
-    expect(exitCode).toBe(0);
     expect(existsSync(marker)).toBe(true);
+    expect(exitCode).toBe(0);
   } finally {
     if (child.exitCode === null) child.kill();
     if (existsSync(pidFile) && !existsSync(marker)) {
@@ -307,6 +313,115 @@ async function verifyMcpShutdownOnClientDisconnect(): Promise<void> {
         }
       }
     }
+  }
+}
+
+async function verifyAppServerShutdownOnSignal(): Promise<void> {
+  const home = mkdtempSync(join(tmpdir(), "letta-acp-app-server-shutdown-"));
+  tempDirs.push(home);
+  const marker = join(home, "shutdown-marker");
+  const pidFile = join(home, "app-server-pid");
+  const appServerUrl = startFakeAppServer();
+  const agentPath = join(import.meta.dir, "..", "src", "index.ts");
+  const cliPath = join(
+    import.meta.dir,
+    "fixtures",
+    "stubborn-app-server.ts",
+  );
+  const child = Bun.spawn([process.execPath, agentPath], {
+    cwd: join(import.meta.dir, ".."),
+    env: {
+      ...process.env,
+      HOME: home,
+      LETTA_ACP_BACKEND: "local",
+      LETTA_AGENT_ID: TEST_RUNTIME.agent_id,
+      LETTA_CLI_PATH: cliPath,
+      FAKE_APP_SERVER_URL: appServerUrl,
+      APP_SERVER_SHUTDOWN_MARKER: marker,
+      APP_SERVER_PID_FILE: pidFile,
+    },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const send = (message: WireMessage) => {
+    child.stdin.write(`${JSON.stringify(message)}\n`);
+    child.stdin.flush();
+  };
+  send({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: 1, clientCapabilities: {} },
+  });
+  send({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "session/new",
+    params: { cwd: join(import.meta.dir, ".."), mcpServers: [] },
+  });
+
+  let buffer = "";
+  let sessionOpened = false;
+  const decoder = new TextDecoder();
+  let appServerPid: number | null = null;
+  try {
+    for await (const chunk of child.stdout) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let newline = buffer.indexOf("\n");
+      while (newline !== -1) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line) {
+          const message = JSON.parse(line) as WireMessage;
+          if (message.id === 2 && message.result) {
+            sessionOpened = true;
+            break;
+          }
+        }
+        newline = buffer.indexOf("\n");
+      }
+      if (sessionOpened) break;
+    }
+    expect(sessionOpened).toBe(true);
+    expect(existsSync(pidFile)).toBe(true);
+    appServerPid = Number(readFileSync(pidFile, "utf8"));
+    expect(Number.isInteger(appServerPid)).toBe(true);
+
+    child.kill("SIGTERM");
+    const exitCode = await Promise.race([
+      child.exited,
+      Bun.sleep(8_000).then(() => {
+        throw new Error("adapter did not exit after SIGTERM");
+      }),
+    ]);
+    expect(existsSync(marker)).toBe(true);
+    expect(exitCode).toBe(0);
+
+    for (let attempt = 0; attempt < 50 && processExists(appServerPid); attempt++) {
+      await Bun.sleep(20);
+    }
+    expect(processExists(appServerPid)).toBe(false);
+  } finally {
+    if (child.exitCode === null) child.kill();
+    if (appServerPid !== null && processExists(appServerPid)) {
+      try {
+        process.kill(appServerPid, "SIGTERM");
+      } catch {
+        // The fixture may already have exited while cleanup raced the test.
+      }
+    }
+  }
+}
+
+function processExists(pid: number | null): boolean {
+  if (pid === null || !Number.isInteger(pid)) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -342,7 +457,15 @@ describe("acpx client compatibility", () => {
   }, 10_000);
 
   test("waits for MCP subprocess cleanup after the client disconnects", async () => {
-    await verifyMcpShutdownOnClientDisconnect();
+    await verifyMcpShutdown("stdin-close");
+  }, 12_000);
+
+  test("closes MCP children when the ACP server receives SIGTERM", async () => {
+    await verifyMcpShutdown("SIGTERM");
+  }, 12_000);
+
+  test("closes SDK-owned app servers when the ACP server receives SIGTERM", async () => {
+    await verifyAppServerShutdownOnSignal();
   }, 12_000);
 
   test("emits a complete tool lifecycle as ACP notifications", async () => {

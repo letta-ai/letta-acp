@@ -60,7 +60,21 @@ const connection = await acp
   )
   .connect(stream);
 
+let shuttingDown = false;
+const shutdown = () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  connection.close();
+  agent.shutdown();
+};
+
+// Zed can terminate an ACP server without first closing stdio. Close every SDK
+// session while the process can still signal its app-server and MCP children.
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);
+process.once("exit", shutdown);
+
 await connection.closed;
 // Session close begins MCP subprocess shutdown. Do not force-exit here: the
 // child process handles keep Node/Bun alive until that cleanup completes.
-agent.shutdown();
+shutdown();
