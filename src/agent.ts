@@ -35,6 +35,7 @@ import {
   type SDKMessage,
   type SDKResultMessage,
 } from "@letta-ai/letta-agent-sdk";
+import { titleFromFirstMessage } from "./conversation-title.js";
 import { authMethodsForClient } from "./auth.js";
 import { DEFAULT_ACP_MODEL, type LettaAcpConfig } from "./config.js";
 import {
@@ -98,6 +99,11 @@ interface AcpSessionState {
   cwd: string;
   /** Model handle reported by the runtime, updated after ACP model changes. */
   currentModel: string | undefined;
+  /**
+   * Set once the conversation has been titled, so only the first completed
+   * prompt writes a summary and later turns never clobber it.
+   */
+  titled: boolean;
 }
 
 /** Max history messages replayed on session/load. */
@@ -513,6 +519,9 @@ export class LettaAcpAgent {
       modeId: this.config.permissionMode,
       cwd: options.cwd,
       currentModel: bootstrap.model ?? this.config.model,
+      // A resumed conversation may already carry a summary. Treat it as titled
+      // so the first prompt here does not overwrite a name set elsewhere.
+      titled: options.resumeId != null,
     };
     // A client may load the same conversation again while its prior ACP
     // session is still open. Close the displaced SDK session before replacing
@@ -549,9 +558,11 @@ export class LettaAcpAgent {
     state.clientContext = cx;
     state.cancelled = false;
     state.promptActive = true;
+    let ranCommand = false;
 
     try {
       const commandResponse = await this.maybeRunCommand(params, state, cx);
+      if (commandResponse) ranCommand = true;
       if (commandResponse) return commandResponse;
       await state.session.send(toLettaContent(params.prompt));
       // The Letta app-server transport completes a turn with a recoverable
@@ -607,6 +618,50 @@ export class LettaAcpAgent {
       // in-a-turn marker is cleared, so late tool traffic still reaches the
       // client but waits on a deadline.
       state.promptActive = false;
+      if (!ranCommand) {
+        void this.titleConversation(params.sessionId, state, cx, params.prompt);
+      }
+    }
+  }
+
+  /**
+   * Writes a conversation title once, after the first completed prompt, so the
+   * session is findable in the Desktop and CLI conversation lists instead of
+   * showing as "Untitled".
+   *
+   * The title comes from the first user message. It is written as the Letta
+   * conversation summary, which those lists render, and pushed to the ACP
+   * client as a `session_info_update` so the editor's own session list updates
+   * too. Best-effort: a failure here never affects the turn the user is in.
+   */
+  private async titleConversation(
+    sessionId: string,
+    state: AcpSessionState,
+    cx: AgentContext,
+    prompt: ContentBlock[],
+  ): Promise<void> {
+    if (state.titled) return;
+    const firstText = prompt.find(
+      (block): block is ContentBlock & { type: "text"; text: string } =>
+        block.type === "text" && typeof block.text === "string",
+    );
+    const title = firstText ? titleFromFirstMessage(firstText.text) : null;
+    if (!title) return;
+
+    // Claim the slot before the write so a second prompt arriving while this
+    // is in flight cannot title the conversation again.
+    state.titled = true;
+    try {
+      await this.client.conversations.update(sessionId, { summary: title });
+      await cx.notify(methods.client.session.update, {
+        sessionId,
+        update: { sessionUpdate: "session_info_update", title },
+      });
+    } catch (error) {
+      state.titled = false;
+      log(
+        `conversation title failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 

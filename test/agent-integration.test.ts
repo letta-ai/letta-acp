@@ -26,6 +26,7 @@ class FakeAppServer {
   readonly createdAgentPinGlobals: unknown[] = [];
   readonly approvalResponses: WireMessage[] = [];
   readonly conversationRetrieveIds: string[] = [];
+  readonly conversationUpdates: WireMessage[] = [];
   closedSockets = 0;
   readonly updatedModelPayloads: WireMessage[] = [];
   private nextConversation = 0;
@@ -217,6 +218,24 @@ class FakeAppServer {
             agent_id: conversationId.includes("foreign") ? "agent-other" : "agent-test",
             archived: conversationId.includes("archived"),
           },
+        });
+        return;
+      }
+      case "conversation_update": {
+        const conversationId = requiredString(
+          message.conversation_id,
+          "conversation_update.conversation_id",
+        );
+        const body = (message.body ?? {}) as WireMessage;
+        this.conversationUpdates.push({ conversation_id: conversationId, ...body });
+        socket.push({
+          type: "conversation_update_response",
+          request_id: requiredString(
+            message.request_id,
+            "conversation_update.request_id",
+          ),
+          success: true,
+          conversation: { id: conversationId, ...body },
         });
         return;
       }
@@ -1059,6 +1078,49 @@ describe("Agent SDK app-server integration", () => {
         sessionUpdate: "agent_message_chunk",
         content: { type: "text", text: "PROMPT_OK" },
       });
+    } finally {
+      agent.shutdown();
+    }
+  });
+
+  test("titles the conversation from the first prompt and not again", async () => {
+    const server = new FakeAppServer();
+    const agent = createAgent(server);
+    const { context, updates } = createContext();
+
+    try {
+      const session = await openSession(agent, context);
+      await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "fix the flaky auth test" }],
+        },
+        context,
+      );
+      // The title write happens after the turn returns, off the response path.
+      await Bun.sleep(50);
+
+      expect(server.conversationUpdates).toEqual([
+        {
+          conversation_id: session.sessionId,
+          summary: "fix the flaky auth test",
+        },
+      ]);
+      expect(updates).toContainEqual({
+        sessionUpdate: "session_info_update",
+        title: "fix the flaky auth test",
+      });
+
+      await agent.prompt(
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "now add pagination" }],
+        },
+        context,
+      );
+      await Bun.sleep(50);
+
+      expect(server.conversationUpdates).toHaveLength(1);
     } finally {
       agent.shutdown();
     }
