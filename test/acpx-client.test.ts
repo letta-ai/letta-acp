@@ -114,6 +114,13 @@ function startFakeAppServer() {
               run_id: "run-acpx",
               stop_reason: "end_turn",
             });
+            // SDK 0.8 completes the turn on turn_finished, not stop_reason.
+            socket.send(JSON.stringify({
+              type: "turn_finished",
+              runtime: TEST_RUNTIME,
+              run_id: "run-acpx",
+              stop_reason: "end_turn",
+            }));
             return;
           }
         }

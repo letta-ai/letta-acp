@@ -19,6 +19,14 @@ interface BackendExpectation {
   marker: string;
 }
 
+function describeError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const data = (error as { data?: unknown }).data;
+  const dataText =
+    data === undefined ? "" : `\n${JSON.stringify(data, null, 2)}`;
+  return `${error.stack ?? error.message}${dataText}`;
+}
+
 class LiveBackendError extends Error {
   constructor(
     cause: unknown,
@@ -102,9 +110,7 @@ try {
 }
 
 if (primaryError) {
-  const detail = primaryError instanceof Error
-    ? primaryError.stack ?? primaryError.message
-    : String(primaryError);
+  const detail = describeError(primaryError);
   throw new Error(
     `${detail}${adapterStderr ? `\n\nAdapter stderr:\n${adapterStderr}` : ""}`,
   );
