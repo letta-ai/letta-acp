@@ -816,6 +816,16 @@ export class LettaAcpAgent {
             if (sawActivity || idleStatusCount >= 2) {
               return { kind: "idle" };
             }
+            // A grace round is the contradicted-completion path. An empty idle
+            // there is the server confirming the listed runs will not continue.
+            // SDK 0.8 settles those run ids with the premature result, so the
+            // continuation is dropped and a second idle never arrives.
+            if (
+              firstMessageDeadlineMs !== undefined &&
+              message.activeRunIds.length === 0
+            ) {
+              return { kind: "idle" };
+            }
           }
           continue;
         }

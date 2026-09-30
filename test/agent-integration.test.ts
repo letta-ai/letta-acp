@@ -384,11 +384,7 @@ class FakeAppServer {
         run_id: "run-replacement",
         content: "REPLACEMENT_OK",
       });
-      this.pushDelta(socket, runtime, {
-        message_type: "stop_reason",
-        run_id: "run-replacement",
-        stop_reason: "end_turn",
-      });
+      this.finishTurn(socket, runtime, "run-replacement", "end_turn");
       return;
     }
     if (promptText.includes("fragmented prompt")) {
@@ -428,11 +424,7 @@ class FakeAppServer {
           input: { file_path: "/tmp/test.txt" },
         },
       });
-      this.pushDelta(socket, runtime, {
-        message_type: "stop_reason",
-        run_id: "run-approval",
-        stop_reason: "requires_approval",
-      });
+      this.finishTurn(socket, runtime, "run-approval", "requires_approval");
       return;
     }
 
@@ -463,11 +455,7 @@ class FakeAppServer {
         }),
         status: "success",
       });
-      this.pushDelta(socket, runtime, {
-        message_type: "stop_reason",
-        run_id: "run-edit",
-        stop_reason: "end_turn",
-      });
+      this.finishTurn(socket, runtime, "run-edit", "end_turn");
       return;
     }
 
@@ -476,11 +464,7 @@ class FakeAppServer {
       run_id: "run-prompt",
       content: "PROMPT_OK",
     });
-    this.pushDelta(socket, runtime, {
-      message_type: "stop_reason",
-      run_id: "run-prompt",
-      stop_reason: "end_turn",
-    });
+    this.finishTurn(socket, runtime, "run-prompt", "end_turn");
   }
 
   private handleCommand(socket: ServerSocket, message: WireMessage): void {
@@ -525,11 +509,7 @@ class FakeAppServer {
         input: { file_path: "/tmp/command-test.txt" },
       },
     });
-    this.pushDelta(socket, runtime, {
-      message_type: "stop_reason",
-      run_id: "run-command-approval",
-      stop_reason: "requires_approval",
-    });
+    this.finishTurn(socket, runtime, "run-command-approval", "requires_approval");
   }
 
   /**
@@ -560,11 +540,7 @@ class FakeAppServer {
       tool_return: "nothing to commit",
       status: "success",
     });
-    this.pushDelta(socket, runtime, {
-      message_type: "stop_reason",
-      run_id: "run-fragmented",
-      stop_reason: "end_turn",
-    });
+    this.finishTurn(socket, runtime, "run-fragmented", "end_turn");
   }
 
   /**
@@ -617,6 +593,31 @@ class FakeAppServer {
     delta: WireMessage,
   ): void {
     socket.push({ type: "stream_delta", runtime, delta });
+  }
+
+  /**
+   * Agent SDK 0.8 parks a pending terminal on `stop_reason` and completes the
+   * turn only after `turn_finished`. Letta Code has emitted that event since
+   * 0.30.28; a fake that stops at `stop_reason` leaves the turn open until
+   * `requestTimeoutMs`.
+   */
+  private finishTurn(
+    socket: ServerSocket,
+    runtime: RuntimeScope,
+    runId: string,
+    stopReason: string,
+  ): void {
+    this.pushDelta(socket, runtime, {
+      message_type: "stop_reason",
+      run_id: runId,
+      stop_reason: stopReason,
+    });
+    socket.push({
+      type: "turn_finished",
+      runtime,
+      run_id: runId,
+      stop_reason: stopReason,
+    });
   }
 }
 
@@ -1601,7 +1602,7 @@ describe("Agent SDK app-server integration", () => {
     }
   });
 
-  test("keeps the turn open when the server is still running a job", async () => {
+  test("ends a contradicted turn when the SDK drops the still-running continuation", async () => {
     const server = new FakeAppServer();
     const agent = createAgent(server);
     const { context, updates } = createContext();
@@ -1617,9 +1618,10 @@ describe("Agent SDK app-server integration", () => {
       );
 
       expect(result).toEqual({ stopReason: "end_turn" });
-      // Returning at the first (contradicted) completion would end the prompt
-      // before this arrived, stranding the rest of the turn outside it.
-      expect(updates).toContainEqual({
+      // SDK 0.8 settles every run id listed on the contradicted idle status.
+      // The continuation for that run is dropped before this adapter can see
+      // it, so the prompt must end instead of waiting for a second idle.
+      expect(updates).not.toContainEqual({
         sessionUpdate: "agent_message_chunk",
         content: { type: "text", text: "STILL_WORKING" },
       });
