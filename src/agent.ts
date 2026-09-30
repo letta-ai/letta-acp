@@ -1211,14 +1211,22 @@ export class LettaAcpAgent {
       return this.config.agentId;
     }
     log("creating a new Letta agent (set LETTA_AGENT_ID to reuse one)...");
-    const agentId = await this.client.createAgent({
-      // SDK 0.5 made personality presets opt-in. Keep the adapter's established
-      // behavior instead of silently creating a zero-memory generic agent.
-      personality: "memo",
-      name: "Letta",
-      description: "Letta agent driven through the Agent Client Protocol",
-      model: this.config.model ?? DEFAULT_ACP_MODEL,
-    });
+    let agentId: string;
+    try {
+      agentId = await this.client.createAgent({
+        // SDK 0.5 made personality presets opt-in. Keep the adapter's established
+        // behavior instead of silently creating a zero-memory generic agent.
+        personality: "memo",
+        name: "Letta",
+        description: "Letta agent driven through the Agent Client Protocol",
+        model: this.config.model ?? DEFAULT_ACP_MODEL,
+      });
+    } catch (error) {
+      log(
+        `agent creation failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+      );
+      throw error;
+    }
     log(
       `created agent ${agentId} — set LETTA_AGENT_ID=${agentId} to keep using it`,
     );
