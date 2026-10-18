@@ -3,6 +3,8 @@ name: Bump version and release
 run-name: Release @letta-ai/letta-acp (${{ inputs.cascade_id || 'manual' }})
 
 on:
+  schedule:
+    - cron: "41 * * * *"
   workflow_dispatch:
     inputs:
       version_type:
@@ -31,7 +33,57 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  sync-letta-runtime:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch release for latest compatible runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          package_json="$(
+            gh api "repos/${GITHUB_REPOSITORY}/contents/package.json?ref=main" --jq '.content' \
+              | base64 -d
+          )"
+          current_sdk_range="$(jq -r '.dependencies["@letta-ai/letta-agent-sdk"]' <<< "$package_json")"
+          current_code_version="$(jq -r '.dependencies["@letta-ai/letta-code"]' <<< "$package_json")"
+          latest_sdk_version="$(npm view @letta-ai/letta-agent-sdk version)"
+          latest_code_version="$(npm view @letta-ai/letta-code version)"
+          sdk_code_version="$(npm view "@letta-ai/letta-agent-sdk@$latest_sdk_version" dependencies.@letta-ai/letta-code)"
+
+          for version in "$latest_sdk_version" "$latest_code_version" "$sdk_code_version"; do
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Expected stable runtime versions, got SDK '$latest_sdk_version', Code '$latest_code_version', SDK dependency '$sdk_code_version'."
+              exit 1
+            fi
+          done
+
+          if [ "$sdk_code_version" != "$latest_code_version" ]; then
+            echo "Agent SDK $latest_sdk_version still uses Letta Code $sdk_code_version; waiting for Letta Code $latest_code_version."
+            exit 0
+          fi
+
+          if [ "$current_sdk_range" = "^$latest_sdk_version" ] && [ "$current_code_version" = "$latest_code_version" ]; then
+            echo "ACP already uses Agent SDK $latest_sdk_version and Letta Code $latest_code_version."
+            exit 0
+          fi
+
+          cascade_id="letta-code-v${latest_code_version}-acp-sync-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gh workflow run release.yml \
+            --ref main \
+            -f version_type=patch \
+            -f prerelease= \
+            -f letta_agent_sdk_version="$latest_sdk_version" \
+            -f letta_code_version="$latest_code_version" \
+            -f cascade_id="$cascade_id"
+
   publish:
+    if: github.event_name == 'workflow_dispatch'
     name: Bump, release, and publish to npm
     runs-on: ubuntu-latest
     timeout-minutes: 15
