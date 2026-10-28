@@ -180,6 +180,7 @@ non-loopback deployments enable auth
 | `LETTA_AGENT_ID` | reuse an existing agent instead of creating a visible, globally unpinned agent named `Letta` |
 | `LETTA_ACP_MODEL` | optional model override for sessions, as a `provider/model` handle (e.g. `anthropic/claude-fable-5`, `openai/gpt-4.1`); new agents default to `letta/auto`, while reused agents keep their model when this is unset — run `/model` to list valid handles |
 | `LETTA_ACP_PERMISSION_MODE` | initial session mode: `standard` (default), `acceptEdits`, `unrestricted` — switchable live via `session/set_mode` (Zed's mode dropdown) |
+| `LETTA_ACP_IDLE_EVICT_S` | seconds a session may sit idle before the adapter closes its Letta runtime, reopening the same conversation on the next request; `600` by default, `0` disables it. If closing a runtime fails, that conversation's later requests fail too, rather than reopening it behind a runtime still holding its child processes — restart the adapter to recover it |
 
 Note on tool execution: with `remote` and `cloud`, built-in tools (Read, Bash,
 …) run where the harness runs — the server/sandbox filesystem, not your

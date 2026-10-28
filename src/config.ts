@@ -28,6 +28,12 @@ export interface LettaAcpConfig {
    * listing active runs. Defaults to 30 seconds.
    */
   prematureResultGraceMs?: number;
+  /**
+   * How long an inactive session may hold its Letta runtime before the adapter
+   * closes it. The conversation is reopened transparently on the next request.
+   * Defaults to ten minutes; 0 disables eviction.
+   */
+  idleEvictMs?: number;
 }
 
 const PERMISSION_MODES: PermissionMode[] = [
@@ -38,6 +44,23 @@ const PERMISSION_MODES: PermissionMode[] = [
 
 const BACKENDS = ["local", "remote", "cloud", "cloud-oauth"] as const;
 export const DEFAULT_ACP_MODEL = "letta/auto";
+
+/** Idle window after which an unused session's runtime is released. */
+export const DEFAULT_IDLE_EVICT_MS = 600_000;
+
+/**
+ * Reads LETTA_ACP_IDLE_EVICT_S. An unset, blank, non-numeric or negative value
+ * keeps the default rather than disabling eviction, so a typo cannot silently
+ * reintroduce unbounded runtime accumulation. An explicit 0 disables it.
+ */
+export function idleEvictMsFromEnv(
+  raw: string | undefined,
+): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_IDLE_EVICT_MS;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds < 0) return DEFAULT_IDLE_EVICT_MS;
+  return seconds * 1000;
+}
 
 export function configFromEnv(
   env: Record<string, string | undefined> = process.env,
@@ -112,5 +135,6 @@ export function configFromEnv(
     sessionRegistryDir:
       env.LETTA_ACP_STATE_DIR ?? join(homedir(), ".letta", "letta-acp", "sessions"),
     sessionRegistryScope,
+    idleEvictMs: idleEvictMsFromEnv(env.LETTA_ACP_IDLE_EVICT_S),
   };
 }
