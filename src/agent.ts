@@ -122,6 +122,14 @@ const DEFAULT_OUT_OF_TURN_PERMISSION_TIMEOUT_MS = 300_000;
  * enough that a server which never speaks again cannot wedge the prompt.
  */
 const DEFAULT_PREMATURE_RESULT_GRACE_MS = 30_000;
+/**
+ * How long to wait for the backend's synthesized terminal result after an idle
+ * loop status. The local backend publishes the idle status first and delivers
+ * the result at the start of the next stream round, so a turn that ends on the
+ * idle status alone leaves the result queued — and the following prompt then
+ * adopts it as its own completion, returning instantly with no output.
+ */
+const TERMINAL_RESULT_DRAIN_GRACE_MS = 3_000;
 
 /** Safety cap on stream rounds while waiting for a slash command to finish. */
 const EXECUTE_COMMAND_MAX_ROUNDS = 50;
@@ -564,6 +572,7 @@ export class LettaAcpAgent {
       // stream while approvals resolve) until the run goes idle.
       let mode: "turn" | "recovery" = "turn";
       let graceMs: number | undefined;
+      let drainedTerminal = false;
       while (true) {
         const outcome = await this.pumpStream(
           params.sessionId,
@@ -595,8 +604,21 @@ export class LettaAcpAgent {
             return this.toPromptResponse(state, result);
           }
           case "idle":
-          case "stream_end":
+          case "stream_end": {
+            if (!drainedTerminal) {
+              drainedTerminal = true;
+              const drained = await this.drainTerminalResult(
+                state,
+                TERMINAL_RESULT_DRAIN_GRACE_MS,
+              );
+              log(
+                drained
+                  ? "drained the queued terminal result after idle"
+                  : "no queued terminal result to drain after idle",
+              );
+            }
             return { stopReason: "end_turn" };
+          }
         }
       }
     } catch (error) {
@@ -748,6 +770,30 @@ export class LettaAcpAgent {
   }
 
   /**
+   * Consumes the synthesized terminal result the local backend delivers after an
+   * idle loop status. Leaving it queued poisons the next prompt: that stream
+   * round reports completion immediately and the user's request is dropped.
+   * Bounded by a deadline so a backend that never sends one cannot wedge the
+   * turn.
+   */
+  private async drainTerminalResult(
+    state: AcpSessionState,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    const stream = state.session.stream()[Symbol.asyncIterator]();
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const step = await raceDeadline(
+        stream.next(),
+        Math.max(1, deadline - Date.now()),
+      );
+      if (!step || step.done) return false;
+      if (step.value?.type === "result") return true;
+    }
+    return false;
+  }
+
+  /**
    * Iterates one session.stream() round, forwarding events to the client.
    * In "recovery" mode (post-approval continuation) there is no terminal
    * result message, so loop_status transitions decide when the turn is over.
@@ -784,6 +830,9 @@ export class LettaAcpAgent {
       const message = step.value;
 
       if (message.type === "result") {
+        log(
+          `result message: success=${message.success} stopReason=${message.stopReason ?? "none"} errorCode=${message.errorCode ?? "none"}`,
+        );
         // An idle loop status that still lists active runs makes the SDK
         // synthesize a successful, stop-reason-less turn result. Taking it at
         // face value ends the prompt mid-run, stranding the tool calls that
@@ -828,6 +877,31 @@ export class LettaAcpAgent {
             }
           }
           continue;
+        }
+        // The local backend completes a turn without emitting a terminal result
+        // message, so an idle loop status is the only completion signal. Two
+        // guards are required before trusting it:
+        //  - sawActivity: the backend also queues stale idle statuses (observed
+        //    before the model produced anything); settling on those drops the reply.
+        //  - no outstanding tool calls: a pending tool approval also presents as
+        //    idle with no active runs. Ending the turn there strands the call, and
+        //    the approval then arrives outside any turn, leaving the client with a
+        //    tool card that can never complete.
+        if (
+          message.status === "WAITING_ON_INPUT" &&
+          message.activeRunIds.length === 0 &&
+          state.toolCalls.size === 0
+        ) {
+          idleStatusCount += 1;
+          log(
+            `idle loop status with no active runs (count=${idleStatusCount}, sawActivity=${sawActivity})`,
+          );
+          if (sawActivity) {
+            log(
+              "ending turn on idle loop status (no terminal result from backend)",
+            );
+            return { kind: "idle" };
+          }
         }
       }
       const forwarded = await this.forwardMessage(
